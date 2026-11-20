@@ -1,20 +1,9 @@
-"""vLLM-Omni pipeline for the GLM-Image HY/MoE student checkpoint.
-
-The model implementation is vendored under ``vendor/hygen`` so vLLM-Omni owns
-the model code and execution path. A worker mode remains available only as a
-parity/debug fallback.
-"""
+"""Native vLLM-Omni pipeline for the GLM-Image HY/MoE student checkpoint."""
 
 from __future__ import annotations
 
-import base64
-import io
-import json
 import logging
 import os
-import sys
-import threading
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, ClassVar
@@ -31,8 +20,7 @@ from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 logger = logging.getLogger(__name__)
 
 _MODEL_DIR = Path(__file__).resolve().parent
-_VENDOR_ROOT = _MODEL_DIR / "vendor"
-_VENDORED_CONFIGS = _VENDOR_ROOT / "configs"
+_VENDORED_CONFIGS = _MODEL_DIR / "vendor" / "configs"
 
 
 def _prompt_text(prompt_value: Any) -> str:
@@ -49,7 +37,7 @@ def _image_to_tensor(image: Image.Image) -> torch.Tensor:
 
 
 class GlmImageMoeTransfusionPipeline(nn.Module, SupportsComponentDiscovery):
-    """Run the GLM-Image HY/MoE model inside the vLLM-Omni worker process."""
+    """Run the vendored GLM-Image HY/MoE model inside vLLM-Omni."""
 
     _dit_modules: ClassVar[list[str]] = []
     _encoder_modules: ClassVar[list[str]] = []
@@ -60,18 +48,8 @@ class GlmImageMoeTransfusionPipeline(nn.Module, SupportsComponentDiscovery):
         super().__init__()
         custom_args = od_config.custom_pipeline_args or {}
         self.custom_args = custom_args
-        self.mode = str(custom_args.get("mode", "native"))
         self.prefix = prefix
         self.device = torch.device(str(custom_args.get("worker_device", "cpu")))
-
-        # Worker mode is retained for parity/debug only.
-        self.endpoint = str(
-            custom_args.get("hygen_endpoint")
-            or os.environ.get("HYGEN_WORKER_ENDPOINT", "http://127.0.0.1:18080")
-        ).rstrip("/")
-        self.timeout = float(custom_args.get("hygen_timeout", 1800))
-        self.default_sampler = str(custom_args.get("sampler", "ode"))
-        self.default_seed = int(custom_args.get("seed", 1234))
 
         self.spec = str(custom_args.get("spec", "dmd2_lyzsft10000_s2000"))
         self.ckpt = str(
@@ -80,42 +58,34 @@ class GlmImageMoeTransfusionPipeline(nn.Module, SupportsComponentDiscovery):
                 "/mnt/share/d00911077/glm-image/g/dmd2_lyzsft10000_s2000",
             )
         )
-        raw_devices = custom_args.get("devices", os.environ.get("HYGEN_DEVICES", "4,5,6,7"))
+        raw_devices = custom_args.get("devices", os.environ.get("VLLM_OMNI_GLM_IMAGE_DEVICES", "0,1,2,3"))
         if isinstance(raw_devices, str):
             self.devices = [int(item) for item in raw_devices.split(",") if item.strip()]
         else:
             self.devices = [int(item) for item in raw_devices]
+        self.default_sampler = str(custom_args.get("sampler", "ode"))
+        self.default_seed = int(custom_args.get("seed", 1234))
 
-        self._executor: ThreadPoolExecutor | None = None
-        self._inferencer: Any | None = None
-        self._load_thread_id: int | None = None
-        self._load_lock = threading.Lock()
+        self._prepare_environment(custom_args)
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="glm-image-model",
+        )
+        # Model loading and generation must stay on one thread because torch_npu
+        # keeps its device context thread-local.
+        self._inferencer = self._executor.submit(self._load_model).result()
 
-        if self.mode == "native":
-            self._prepare_native_environment(custom_args)
-            self._executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="glm-image-native",
-            )
-            # Loading and generation must happen on the same thread because
-            # torch_npu keeps its device context thread-local.
-            self._inferencer = self._executor.submit(self._load_native).result()
-            self._load_thread_id = threading.get_ident()
-        elif self.mode != "worker":
-            raise ValueError(f"unsupported GLM-Image MoE pipeline mode: {self.mode}")
-
-    def _prepare_native_environment(self, custom_args: dict[str, Any]) -> None:
-        vendor_root = str(_VENDOR_ROOT)
-        if vendor_root not in sys.path:
-            sys.path.insert(0, vendor_root)
-
-        os.environ.setdefault("HYGEN_WEIGHTS_ROOT", str(Path(self.ckpt).parent))
+    def _prepare_environment(self, custom_args: dict[str, Any]) -> None:
         os.environ.setdefault(
-            "HYGEN_TOKENIZER_PATH",
+            "VLLM_OMNI_GLM_IMAGE_WEIGHTS_ROOT",
+            str(Path(self.ckpt).parent),
+        )
+        os.environ.setdefault(
+            "VLLM_OMNI_GLM_IMAGE_TOKENIZER_PATH",
             str(custom_args.get("tokenizer_path", "/mnt/share/d00911077/glm-image/assets/glm_image_tokenizer")),
         )
         os.environ.setdefault(
-            "HYGEN_VAE_PATH",
+            "VLLM_OMNI_GLM_IMAGE_VAE_PATH",
             str(
                 custom_args.get(
                     "vae_path",
@@ -123,49 +93,21 @@ class GlmImageMoeTransfusionPipeline(nn.Module, SupportsComponentDiscovery):
                 )
             ),
         )
-        os.environ.setdefault("HYGEN_CONFIGS_ROOT", str(_VENDORED_CONFIGS))
-        os.environ.setdefault("HYGEN_DEVICE_TYPE", "npu")
+        os.environ.setdefault("VLLM_OMNI_GLM_IMAGE_CONFIGS_ROOT", str(_VENDORED_CONFIGS))
+        os.environ.setdefault("VLLM_OMNI_GLM_IMAGE_DEVICE_TYPE", "npu")
 
-    def _load_native(self) -> Any:
-        from hygen import Inferencer
+    def _load_model(self) -> Any:
+        from .vendor.model_impl import Inferencer
 
-        logger.info("loading vendored hygen model: spec=%s devices=%s ckpt=%s", self.spec, self.devices, self.ckpt)
+        logger.info(
+            "loading GLM-Image model: spec=%s devices=%s ckpt=%s",
+            self.spec,
+            self.devices,
+            self.ckpt,
+        )
         return Inferencer.from_spec(self.spec, devices=self.devices, ckpt=self.ckpt)
 
-    def _request_worker_generation(
-        self,
-        *,
-        prompt: str,
-        height: int,
-        width: int,
-        seed: int,
-        num_steps: int | None,
-        cfg_scale: float | None,
-        sampler: str,
-    ) -> dict[str, Any]:
-        payload = {
-            "prompt": prompt,
-            "height": height,
-            "width": width,
-            "seed": seed,
-            "num_steps": num_steps,
-            "cfg_scale": cfg_scale,
-            "sampler": sampler,
-            "think": False,
-        }
-        request = urllib.request.Request(
-            f"{self.endpoint}/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
-        if body.get("error"):
-            raise RuntimeError(body["error"])
-        return body
-
-    def _generate_native(
+    def _generate_image(
         self,
         prompt: str,
         height: int,
@@ -175,8 +117,6 @@ class GlmImageMoeTransfusionPipeline(nn.Module, SupportsComponentDiscovery):
         cfg_scale: float | None,
         sampler: str,
     ) -> Image.Image:
-        if self._inferencer is None:
-            raise RuntimeError("native hygen inferencer is not initialized")
         result = self._inferencer.generate(
             prompt,
             think=False,
@@ -201,37 +141,21 @@ class GlmImageMoeTransfusionPipeline(nn.Module, SupportsComponentDiscovery):
         cfg_scale = float(params.guidance_scale) if getattr(params, "guidance_scale_provided", False) else None
         sampler = str(self.custom_args.get("sampler") or params.extra_args.get("sampler") or self.default_sampler)
 
-        if self.mode == "native":
-            assert self._executor is not None
-            image = self._executor.submit(
-                self._generate_native,
-                prompt,
-                height,
-                width,
-                seed,
-                num_steps,
-                cfg_scale,
-                sampler,
-            ).result()
-        else:
-            body = self._request_worker_generation(
-                prompt=prompt,
-                height=height,
-                width=width,
-                seed=seed,
-                num_steps=num_steps,
-                cfg_scale=cfg_scale,
-                sampler=sampler,
-            )
-            image = Image.open(io.BytesIO(base64.b64decode(body["image_base64"]))).convert("RGB")
-
-        tensor = _image_to_tensor(image)
+        image = self._executor.submit(
+            self._generate_image,
+            prompt,
+            height,
+            width,
+            seed,
+            num_steps,
+            cfg_scale,
+            sampler,
+        ).result()
         return DiffusionOutput(
-            output=tensor,
+            output=_image_to_tensor(image),
             custom_output={
                 "width": image.width,
                 "height": image.height,
-                "mode": self.mode,
             },
         )
 
@@ -247,7 +171,7 @@ class GlmImageMoeTransfusionPipeline(nn.Module, SupportsComponentDiscovery):
         return [self._generate_one(request) for request in req.requests]
 
     def load_weights(self, weights: Any) -> set[str]:
-        """The vendored inferencer owns the checkpoint; loader sees no local params."""
+        """The internal model loader owns the checkpoint; no local params."""
         del weights
         return set()
 
