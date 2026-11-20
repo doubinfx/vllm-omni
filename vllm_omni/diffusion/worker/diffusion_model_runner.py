@@ -335,11 +335,13 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
                 "rank-local text_encoder transfer."
             )
 
-        current_omni_platform.init_diffusion_model_runner_runtime(
-            vllm_config=self.vllm_config,
-            od_config=self.od_config,
-            device=self.device,
-        )
+        custom_args = getattr(self.od_config, "custom_pipeline_args", None) or {}
+        if not custom_args.get("skip_npu_device"):
+            current_omni_platform.init_diffusion_model_runner_runtime(
+                vllm_config=self.vllm_config,
+                od_config=self.od_config,
+                device=self.device,
+            )
 
         load_device = "cpu" if offload_enabled(self.od_config) else str(self.device)
 

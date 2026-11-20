@@ -376,6 +376,20 @@ class DiffusionWorker:
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
 
+        custom_args = getattr(self.od_config, "custom_pipeline_args", None) or {}
+        if custom_args.get("skip_npu_device"):
+            # Compatibility pipelines may delegate execution to an external
+            # accelerator worker. Keep this worker on CPU so it does not create
+            # a second context on the device owned by that worker.
+            self.device = torch.device("cpu")
+            self.vllm_config = create_diffusion_vllm_config(self.device, self.od_config)
+            logger.info(
+                "Worker %s: using CPU compatibility device for custom pipeline %s",
+                self.rank,
+                self.od_config.model_class_name,
+            )
+            return
+
         # Setup device
         self.device = current_omni_platform.get_torch_device(self.local_rank)
         current_omni_platform.set_device(self.device)
