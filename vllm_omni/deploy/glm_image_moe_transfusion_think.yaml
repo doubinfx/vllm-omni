@@ -1,4 +1,5 @@
 # Native GLM-Image thinking mode: AR stage 0 -> diffusion stage 1.
+pipeline: glm_image_moe_transfusion_think
 async_chunk: false
 
 stages:
