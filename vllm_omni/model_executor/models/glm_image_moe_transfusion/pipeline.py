@@ -10,6 +10,7 @@ from vllm_omni.config.stage_config import (
 _DIFFUSION_ARCH = "GlmImageMoeTransfusionPipeline"
 _AR_ARCH = "GlmImageMoeTransfusionForCausalLM"
 _PROCESSOR = "vllm_omni.model_executor.stage_input_processors.glm_image_moe_transfusion"
+_CHECKPOINT = "vllm_omni.model_executor.models.glm_image_moe_transfusion.checkpoint"
 
 
 def _diffusion_stage(stage_id: int, input_sources: tuple[int, ...]) -> StagePipelineConfig:
@@ -38,6 +39,7 @@ GLM_IMAGE_MOE_TRANSFUSION_PIPELINE = PipelineConfig(
 
 GLM_IMAGE_MOE_TRANSFUSION_THINK_PIPELINE = PipelineConfig(
     model_type="glm_image_moe_transfusion_think",
+    default_deploy_config_name="glm_image_moe_transfusion_think.yaml",
     model_arch=_AR_ARCH,
     hf_architectures=(_AR_ARCH,),
     diffusers_class_name=_DIFFUSION_ARCH,
@@ -52,6 +54,7 @@ GLM_IMAGE_MOE_TRANSFUSION_THINK_PIPELINE = PipelineConfig(
             model_arch=_AR_ARCH,
             engine_output_type="token_ids",
             sampling_constraints={"detokenize": False},
+            model_path_resolver=f"{_CHECKPOINT}.resolve_ar_model_root",
         ),
         _diffusion_stage(1, (0,)),
     ),

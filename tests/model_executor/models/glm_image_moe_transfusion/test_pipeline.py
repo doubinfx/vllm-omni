@@ -1,4 +1,7 @@
 from vllm_omni.config.stage_config import StageExecutionType
+from vllm_omni.model_executor.models.glm_image_moe_transfusion.checkpoint import (
+    resolve_ar_model_root,
+)
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.pipeline import (
     GLM_IMAGE_MOE_TRANSFUSION_PIPELINE,
     GLM_IMAGE_MOE_TRANSFUSION_THINK_PIPELINE,
@@ -18,3 +21,13 @@ def test_thinking_pipeline_has_ar_then_diffusion() -> None:
     assert ar.engine_output_type == "token_ids"
     assert diffusion.execution_type is StageExecutionType.DIFFUSION
     assert diffusion.input_sources == (0,)
+
+
+def test_ar_model_root_resolves_sibling_view(tmp_path) -> None:
+    diffusion = tmp_path / "diffusion"
+    ar_view = tmp_path / "ar_model"
+    diffusion.mkdir()
+    ar_view.mkdir()
+    (ar_view / "config.json").write_text("{}")
+
+    assert resolve_ar_model_root(str(diffusion), None, None) == str(ar_view)
