@@ -9,9 +9,38 @@ shared checkpoint without duplicating weights on disk.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from types import MethodType
+from typing import Any
 
 import torch
 from vllm.model_executor.models.glm4_moe_lite import Glm4MoeLiteForCausalLM
+
+
+def _is_ascend_a2() -> bool:
+    npu = getattr(torch, "npu", None)
+    if npu is None or not npu.is_available():
+        return False
+    device_name = npu.get_device_name(npu.current_device()).upper()
+    return "910B" in device_name
+
+
+def _disable_mla_prolog_v3(model: torch.nn.Module) -> None:
+    """Use the legacy MLA preprocessing that A2 can execute.
+
+    vLLM-Ascend's PROLOG_V3 path converts ``weight_uq_qr`` to FRACTAL_NZ
+    during weight loading.  On A2/CANN 9.2 the required TransData kernel is
+    unavailable for this GLM-Image MLA geometry.  Apply the fallback only to
+    this adapter's own attention modules so other GLM-Image variants and
+    models retain their platform default.
+    """
+    if not _is_ascend_a2():
+        return
+
+    for module in model.modules():
+        impl: Any = getattr(module, "impl", None)
+        if not callable(getattr(impl, "supports_prolog_v3_writer", None)):
+            continue
+        impl.supports_prolog_v3_writer = MethodType(lambda _self: False, impl)
 
 
 class GlmImageMoeTransfusionForCausalLM(Glm4MoeLiteForCausalLM):
@@ -46,4 +75,6 @@ class GlmImageMoeTransfusionForCausalLM(Glm4MoeLiteForCausalLM):
                     continue
                 yield name, tensor
 
-        return super().load_weights(expand_ar_weights())
+        loaded = super().load_weights(expand_ar_weights())
+        _disable_mla_prolog_v3(self)
+        return loaded
