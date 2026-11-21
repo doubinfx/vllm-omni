@@ -46,6 +46,28 @@ def _disable_mla_prolog_v3(model: torch.nn.Module) -> None:
 class GlmImageMoeTransfusionForCausalLM(Glm4MoeLiteForCausalLM):
     """GLM4-MoE-lite causal LM over the shared GLM-Image checkpoint."""
 
+    supports_mrope = True
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[Any],
+    ) -> tuple[torch.Tensor, int]:
+        """Return text-only M-RoPE positions for the AR stage.
+
+        GLM-Image uses three M-RoPE channels.  Like the Qwen-family contract,
+        text-only inputs repeat the ordinary token positions on all channels.
+        The native AR stage does not consume visual features; those belong to
+        the diffusion/conditioning stage.
+        """
+        if mm_features:
+            raise ValueError(
+                "GlmImageMoeTransfusionForCausalLM AR stage only accepts text; "
+                "visual features must be handled by the diffusion stage."
+            )
+        positions = torch.arange(len(input_tokens), dtype=torch.long)
+        return positions.unsqueeze(0).expand(3, -1), 0
+
     @staticmethod
     def _is_ar_weight(name: str) -> bool:
         if name.endswith(".mlp.gate.local_tokens_per_expert"):
