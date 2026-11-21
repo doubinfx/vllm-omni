@@ -14,6 +14,76 @@ from typing import Any
 
 import torch
 from vllm.model_executor.models.glm4_moe_lite import Glm4MoeLiteForCausalLM
+from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+)
+
+from vllm_omni.model_executor.models.glm_image_moe_transfusion.prompt import (
+    build_ar_prefix_ids,
+)
+
+
+class GlmImageMoeProcessingInfo(BaseProcessingInfo):
+    """Text-only AR stage exposed through the multimodal serving interface."""
+
+    def get_supported_mm_limits(self) -> dict[str, int]:
+        # The serving renderer only constructs an mm_processor for models with
+        # at least one declared modality. Requests still carry zero media
+        # items; the processor uses mm_processor_kwargs for target dimensions.
+        return {"image": 1}
+
+    def get_mm_max_tokens_per_item(self, seq_len, mm_counts):
+        del seq_len, mm_counts
+        return {"image": 0}
+
+
+class GlmImageMoeDummyInputsBuilder(BaseDummyInputsBuilder):
+    def get_dummy_text(self, mm_counts):
+        del mm_counts
+        return ""
+
+    def get_dummy_mm_data(self, seq_len, mm_counts, mm_options=None):
+        del seq_len, mm_counts, mm_options
+        return {}
+
+
+class GlmImageMoeMultiModalProcessor(BaseMultiModalProcessor):
+    """Tokenize text and let the stage processor hand tokens to diffusion."""
+
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        del hf_inputs, hf_processor_mm_kwargs
+        return {}
+
+    def _get_prompt_updates(
+        self,
+        mm_items,
+        hf_processor_mm_kwargs,
+        out_mm_kwargs,
+    ):
+        del mm_items, hf_processor_mm_kwargs, out_mm_kwargs
+        return []
+
+    def apply(self, inputs, timing_ctx):
+        del timing_ctx
+        tokenizer = self.info.get_tokenizer()
+        prompt = inputs.prompt
+        if not isinstance(prompt, str):
+            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
+        processor_kwargs = inputs.hf_processor_mm_kwargs
+        height = int(processor_kwargs.get("target_h") or processor_kwargs.get("height") or 1024)
+        width = int(processor_kwargs.get("target_w") or processor_kwargs.get("width") or 1024)
+        token_ids, _ = build_ar_prefix_ids(tokenizer, prompt, height, width)
+        return {
+            "type": "multimodal",
+            "prompt_token_ids": token_ids,
+            "mm_kwargs": {},
+            "mm_hashes": {},
+            "mm_placeholders": {},
+        }
 
 
 def _is_ascend_a2() -> bool:
@@ -66,10 +136,42 @@ def _bootstrap_a2_mla_rope_cache(model: torch.nn.Module) -> None:
         return
 
 
-class GlmImageMoeTransfusionForCausalLM(Glm4MoeLiteForCausalLM):
+@MULTIMODAL_REGISTRY.register_processor(
+    GlmImageMoeMultiModalProcessor,
+    info=GlmImageMoeProcessingInfo,
+    dummy_inputs=GlmImageMoeDummyInputsBuilder,
+)
+class GlmImageMoeTransfusionForCausalLM(
+    Glm4MoeLiteForCausalLM,
+    SupportsMultiModal,
+    SupportsMRoPE,
+):
     """GLM4-MoE-lite causal LM over the shared GLM-Image checkpoint."""
 
     supports_mrope = True
+
+    def embed_multimodal(self, **kwargs):
+        """Accept the multimodal interface while carrying no media tensors."""
+        del kwargs
+        return []
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings=None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Use vLLM's standard multimodal embedding merge interface."""
+        return SupportsMultiModal.embed_input_ids(
+            self,
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
 
     def get_mrope_input_positions(
         self,
