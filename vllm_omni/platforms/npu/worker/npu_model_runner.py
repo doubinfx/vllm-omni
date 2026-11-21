@@ -20,11 +20,11 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import using_paged_attention
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable
+
 try:
     from vllm_ascend.worker.model_runner_v1 import SEQ_LEN_WITH_MAX_PA_WORKSPACE
 except ModuleNotFoundError:
-    # The v0.32 Model Runner V2 path no longer exports this tuning constant.
-    SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+    from vllm_ascend.worker.v1.model_runner import SEQ_LEN_WITH_MAX_PA_WORKSPACE
 
 from vllm_omni.core.prefix_cache import stage_prefix_cache_config
 from vllm_omni.model_executor.models.output_templates import OmniOutput
