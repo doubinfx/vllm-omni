@@ -52,6 +52,7 @@ from vllm_omni.metrics.modality import (
 from vllm_omni.model_executor.models.minicpmo_4_5.pipeline import MINICPMO45_REFERENCE_AUDIO_KEY
 from vllm_omni.model_extras import (
     build_text_to_image_prompt,
+    build_text_to_image_tokenization,
     get_extra_body_params,
     get_extra_output_params,
     should_init_extra_args_for_non_diffusion_stages,
@@ -3261,6 +3262,16 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         system_prompt_type: str | None = None
         build_kwargs: dict[str, Any] = {}
         ar_stop_token_ids: list[int] | None = None
+
+        if tokenizer is not None:
+            prompt_tokenization = build_text_to_image_tokenization(
+                model_class_name,
+                prompt,
+                tokenizer,
+                height=height,
+                width=width,
+            )
+            prompt_token_ids = prompt_tokenization.get("prompt_token_ids")
 
         if bot_task is not None or use_system_prompt is not None or custom_system_prompt is not None:
             from vllm_omni.diffusion.models.hunyuan_image3.prompt_utils import (
