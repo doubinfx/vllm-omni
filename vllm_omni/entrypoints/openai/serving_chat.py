@@ -171,6 +171,21 @@ async def _identity_async(value: Any) -> Any:
     return value
 
 
+def resolve_glm_image_transfusion_entry_stage_id(
+    model_class_name: str | None,
+    num_stages: int,
+    think: bool | None,
+) -> int:
+    """Resolve a GLM-Image request to the AR or Diffusion entry stage."""
+    if model_class_name != "GlmImageMoeTransfusionPipeline" or think is None:
+        return 0
+    if think:
+        if num_stages < 2:
+            raise ValueError("think=true requires the GLM-Image thinking service")
+        return 0
+    return 1 if num_stages > 1 else 0
+
+
 class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
     """OpenAI-compatible chat serving for both LLM and Diffusion models.
 
@@ -3591,6 +3606,14 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         if isinstance(engine, AsyncOmni):
             diffusion_engine = cast(AsyncOmni, engine)
             stage_configs = getattr(diffusion_engine, "stage_configs", None) or []
+            try:
+                entry_stage_id = resolve_glm_image_transfusion_entry_stage_id(
+                    self._resolve_multistage_model_class_name(diffusion_engine),
+                    len(stage_configs),
+                    extra_body.get("think"),
+                )
+            except ValueError as exc:
+                return self._create_error_response(str(exc), status_code=400)
             if stream and len(stage_configs) <= 1:
                 return self._create_error_response(
                     "stream=true is only supported for multi-stage image editing pipelines.",
@@ -3626,6 +3649,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 sampling_params_list=sampling_params_list,
                 request_id=request_id,
                 arrival_time=arrival_time,
+                entry_stage_id=entry_stage_id,
             )
             if stream:
                 return self._stream_diffusion_image_chunks(

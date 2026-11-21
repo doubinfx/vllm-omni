@@ -23,6 +23,43 @@ def serving_chat():
     return object.__new__(OmniOpenAIServingChat)
 
 
+@pytest.mark.parametrize(
+    ("num_stages", "think", "expected"),
+    [
+        (2, True, 0),
+        (2, False, 1),
+        (1, False, 0),
+        (1, None, 0),
+    ],
+)
+def test_resolve_glm_image_transfusion_entry_stage_id(num_stages, think, expected):
+    from vllm_omni.entrypoints.openai.serving_chat import (
+        resolve_glm_image_transfusion_entry_stage_id,
+    )
+
+    assert (
+        resolve_glm_image_transfusion_entry_stage_id(
+            "GlmImageMoeTransfusionPipeline",
+            num_stages,
+            think,
+        )
+        == expected
+    )
+
+
+def test_resolve_glm_image_transfusion_entry_stage_id_rejects_missing_ar_stage():
+    from vllm_omni.entrypoints.openai.serving_chat import (
+        resolve_glm_image_transfusion_entry_stage_id,
+    )
+
+    with pytest.raises(ValueError, match="thinking service"):
+        resolve_glm_image_transfusion_entry_stage_id(
+            "GlmImageMoeTransfusionPipeline",
+            1,
+            True,
+        )
+
+
 def test_build_multistage_generation_inputs_applies_stage_specific_overrides(serving_chat):
     from vllm_omni.entrypoints.openai.serving_chat import OmniOpenAIServingChat
 

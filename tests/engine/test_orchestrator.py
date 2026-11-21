@@ -742,6 +742,31 @@ async def test_add_request_bypassing_stage0_enters_at_stage1(orchestrator_factor
 
 
 @pytest.mark.asyncio
+async def test_build_entry_stage_request_bypasses_diffusion_renderer() -> None:
+    """A diffusion entry stage consumes the raw prompt without stage-0 rendering."""
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator.stage_pools = [
+        StagePool(0, FakeStageClient(stage_type="llm", final_output=False)),
+        StagePool(1, FakeStageClient(stage_type="diffusion", final_output=True)),
+    ]
+    prompt = {"prompt": "a cat", "modalities": ["image"]}
+    req_state = SimpleNamespace(
+        sampling_params_list=[_sampling_params(), OmniDiffusionSamplingParams()],
+        final_stage_id=1,
+        request_timestamp=0.0,
+    )
+
+    request = await orchestrator._build_entry_stage_request(
+        "req-diffusion-entry",
+        1,
+        prompt,
+        req_state,
+    )
+
+    assert request is prompt
+
+
+@pytest.mark.asyncio
 async def test_async_chunk_prewarms_after_the_entry_stage(orchestrator_factory) -> None:
     """With stage 0 bypassed, async-chunk prewarm starts after the entry stage."""
     stage0 = FakeStageClient(stage_type="llm", final_output=False)

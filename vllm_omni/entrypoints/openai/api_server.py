@@ -2151,6 +2151,8 @@ async def generate_images(
                 app_state_args = getattr(raw_request.app.state, "args", None)
                 _check_max_generated_image_size(app_state_args, width, height)
                 extra_body["size"] = request.size
+            if request.think is not None:
+                extra_body["think"] = request.think
             if request.negative_prompt is not None:
                 extra_body["negative_prompt"] = request.negative_prompt
             if request.num_inference_steps is not None:
