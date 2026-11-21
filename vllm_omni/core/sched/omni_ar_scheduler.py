@@ -781,14 +781,6 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                 self.waiting, self.kv_holding_waiting = original_wait_queues
             self._restore_omni_wait_queues()
 
-        # vLLM 0.32 can resolve the scheduler and worker runner versions
-        # independently. A V2 worker requires this field, while the scheduler's
-        # V1 assembly leaves it unset. Backfill it defensively from the prompt;
-        # V1 workers ignore the additional field.
-        for new_req in scheduler_output.scheduled_new_reqs:
-            if new_req.prefill_token_ids is None and new_req.prompt_token_ids is not None:
-                new_req.prefill_token_ids = list(new_req.prompt_token_ids)
-
         # Backstop: a step built without ``_update_after_schedule`` (nothing
         # booked, so nothing to reconcile) still leaves here uniform. On the
         # booking paths the rewrite already ran ahead of the booking and this
