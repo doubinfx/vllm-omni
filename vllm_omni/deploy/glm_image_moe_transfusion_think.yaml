@@ -55,4 +55,4 @@ platforms:
           GLM_IMAGE_MOE_STAGE_CONFIG: /mnt/share/d00911077/glm-image/native_stages_v2/ar
           GLM_IMAGE_MOE_TOKENIZER_PATH: /mnt/share/d00911077/glm-image/assets/glm_image_tokenizer
           GLM_IMAGE_MOE_VAE_PATH: /mnt/share/d00911077/glm-image/assets/mnt/cogview_data_cloud/zwd/ckpt/flux2_vae_hf
-          GLM_IMAGE_MOE_VAE_DEVICE: cpu
+          GLM_IMAGE_MOE_VAE_DEVICE: "npu:0"
