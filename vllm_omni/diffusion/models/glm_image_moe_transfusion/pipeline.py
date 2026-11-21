@@ -33,6 +33,12 @@ def _custom_arg(od_config: OmniDiffusionConfig, name: str) -> str | None:
     return os.fspath(value) if value is not None else None
 
 
+def _setting(od_config: OmniDiffusionConfig, name: str) -> str | None:
+    return _custom_arg(od_config, name) or os.environ.get(
+        f"GLM_IMAGE_MOE_{name.upper()}"
+    )
+
+
 def _prompt_text(prompt: Any) -> str:
     if isinstance(prompt, str):
         return prompt
@@ -79,14 +85,14 @@ class GlmImageMoeTransfusionPipeline(nn.Module, DiffusionPipelineProfilerMixin):
         self.od_config = od_config
         self.device = get_local_device()
         self.generator = NativeGlmImageGenerator(
-            checkpoint=_custom_arg(od_config, "checkpoint") or od_config.model,
-            stage_config=_custom_arg(od_config, "stage_config")
+            checkpoint=_setting(od_config, "checkpoint") or od_config.model,
+            stage_config=_setting(od_config, "stage_config")
             or os.path.join(od_config.model, "stage_config"),
-            tokenizer_path=_custom_arg(od_config, "tokenizer_path")
+            tokenizer_path=_setting(od_config, "tokenizer_path")
             or os.path.join(od_config.model, "tokenizer"),
-            vae_path=_custom_arg(od_config, "vae_path")
+            vae_path=_setting(od_config, "vae_path")
             or os.path.join(od_config.model, "vae"),
-            vae_device=_custom_arg(od_config, "vae_device") or "npu:0",
+            vae_device=_setting(od_config, "vae_device") or "npu:0",
         )
         self.setup_diffusion_pipeline_profiler(
             enable_diffusion_pipeline_profiler=od_config.enable_diffusion_pipeline_profiler
