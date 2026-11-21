@@ -1,3 +1,5 @@
+import pytest
+
 from vllm_omni.config.stage_config import StageExecutionType
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.checkpoint import (
     resolve_ar_model_root,
@@ -35,10 +37,26 @@ def test_ar_model_root_resolves_sibling_view(tmp_path) -> None:
 
 
 def test_text_to_image_tokenization_uses_native_ar_prefix() -> None:
-    def tokenizer(text: str, add_special_tokens: bool = False):
-        assert text.startswith("Generate an image")
-        assert add_special_tokens is False
-        return {"input_ids": [10, 11, 12]}
+    expected_tokens = {
+        154824: "<sop>",
+        154825: "<eop>",
+        154827: "<|user|>",
+        154828: "<|assistant|>",
+        154830: "<|begin_of_image|>",
+    }
+
+    class Tokenizer:
+        vocab_size = 154880
+
+        def __call__(self, text: str, add_special_tokens: bool = False):
+            assert text.startswith("Generate an image")
+            assert add_special_tokens is False
+            return {"input_ids": [10, 11, 12]}
+
+        def convert_ids_to_tokens(self, token_id: int):
+            return expected_tokens.get(token_id)
+
+    tokenizer = Tokenizer()
 
     for model_class_name in (
         "GlmImageMoeTransfusionForCausalLM",
@@ -55,10 +73,30 @@ def test_text_to_image_tokenization_uses_native_ar_prefix() -> None:
 
 
 def test_text_to_image_tokenization_is_opt_in() -> None:
-    assert build_text_to_image_tokenization(
-        "UnrelatedImagePipeline",
-        "a shiba inu",
-        object(),
-        height=128,
-        width=128,
-    ) == {}
+    assert (
+        build_text_to_image_tokenization(
+            "UnrelatedImagePipeline",
+            "a shiba inu",
+            object(),
+            height=128,
+            width=128,
+        )
+        == {}
+    )
+
+
+def test_text_to_image_tokenization_rejects_tokenizer_id_drift() -> None:
+    class Tokenizer:
+        vocab_size = 154880
+
+        def convert_ids_to_tokens(self, token_id: int):
+            return "wrong-token"
+
+    with pytest.raises(ValueError, match="special-token mismatch"):
+        build_text_to_image_tokenization(
+            "GlmImageMoeTransfusionPipeline",
+            "a shiba inu",
+            Tokenizer(),
+            height=128,
+            width=128,
+        )

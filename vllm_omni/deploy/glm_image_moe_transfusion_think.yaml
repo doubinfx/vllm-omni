@@ -15,10 +15,11 @@ stages:
     tensor_parallel_size: 4
     worker_cls: vllm_ascend.worker.worker.NPUWorker
     default_sampling_params:
-      temperature: 0.0
-      top_p: 1.0
-      top_k: 1
-      max_tokens: 512
+      temperature: 0.6
+      top_p: 0.9
+      top_k: 50
+      max_tokens: 4072
+      stop_token_ids: [154830, 154827, 154824]
       seed: 42
       detokenize: false
 
@@ -51,8 +52,3 @@ platforms:
           HCCL_NPU_SOCKET_PORT_RANGE: "26200-26399"
           OMP_NUM_THREADS: "64"
           VLLM_OMNI_API_SERVER_TORCH_THREADS: "64"
-          GLM_IMAGE_MOE_CHECKPOINT: /mnt/share/d00911077/glm-image/g/dmd2_lyzsft10000_s2000
-          GLM_IMAGE_MOE_STAGE_CONFIG: /mnt/share/d00911077/glm-image/native_stages_v2/ar
-          GLM_IMAGE_MOE_TOKENIZER_PATH: /mnt/share/d00911077/glm-image/assets/glm_image_tokenizer
-          GLM_IMAGE_MOE_VAE_PATH: /mnt/share/d00911077/glm-image/assets/mnt/cogview_data_cloud/zwd/ckpt/flux2_vae_hf
-          GLM_IMAGE_MOE_VAE_DEVICE: "npu:0"

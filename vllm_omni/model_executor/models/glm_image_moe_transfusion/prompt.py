@@ -47,10 +47,7 @@ def _validate_resolution(height: int, width: int) -> None:
     if height <= 0 or width <= 0:
         raise ValueError(f"height and width must be positive, got {height}x{width}")
     if height % RESOLUTION_ALIGNMENT or width % RESOLUTION_ALIGNMENT:
-        raise ValueError(
-            "GLM-Image resolution must be aligned to "
-            f"{RESOLUTION_ALIGNMENT}, got {height}x{width}"
-        )
+        raise ValueError(f"GLM-Image resolution must be aligned to {RESOLUTION_ALIGNMENT}, got {height}x{width}")
 
 
 def build_ar_prefix_ids(
@@ -92,6 +89,8 @@ def trim_ar_output_ids(generated_ids: Iterable[int]) -> list[int]:
     ids = [int(token_id) for token_id in generated_ids]
     if SOP_TOKEN_ID in ids:
         return ids[: ids.index(SOP_TOKEN_ID)]
+    if USER_TOKEN_ID in ids:
+        return ids[: ids.index(USER_TOKEN_ID)]
     while ids and ids[-1] in (BOI_TOKEN_ID, EOP_TOKEN_ID):
         ids.pop()
     return ids
