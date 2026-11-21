@@ -52,3 +52,13 @@ def test_text_to_image_tokenization_uses_native_ar_prefix() -> None:
             width=256,
         )["prompt_token_ids"]
         assert token_ids == [154827, 154857, 10, 11, 12, 154828]
+
+
+def test_text_to_image_tokenization_is_opt_in() -> None:
+    assert build_text_to_image_tokenization(
+        "UnrelatedImagePipeline",
+        "a shiba inu",
+        object(),
+        height=128,
+        width=128,
+    ) == {}
