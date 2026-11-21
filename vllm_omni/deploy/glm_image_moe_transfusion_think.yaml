@@ -12,9 +12,7 @@ stages:
     devices: "0,1,2,3"
     distributed_executor_backend: "mp"
     tensor_parallel_size: 4
-    sequence_parallel_size: 1
-    worker_cls: vllm_omni.platforms.npu.worker.npu_ar_worker.NPUARWorker
-    scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+    worker_cls: vllm_ascend.worker.worker.NPUWorker
     default_sampling_params:
       temperature: 0.0
       top_p: 1.0
