@@ -36,13 +36,13 @@ class GlmImageMoeTransfusionForCausalLM(Glm4MoeLiteForCausalLM):
                     base = name[: -len(".gate_up_proj")]
                     gate, up = tensor.chunk(2, dim=1)
                     for expert_id in range(tensor.shape[0]):
-                        yield f"{base}.{expert_id}.gate_proj.weight", gate[expert_id]
-                        yield f"{base}.{expert_id}.up_proj.weight", up[expert_id]
+                        yield f"{base}.{expert_id}.gate_proj.weight", gate[expert_id].contiguous()
+                        yield f"{base}.{expert_id}.up_proj.weight", up[expert_id].contiguous()
                     continue
                 if name.endswith(".mlp.experts.down_proj"):
                     base = name[: -len(".down_proj")]
                     for expert_id in range(tensor.shape[0]):
-                        yield f"{base}.{expert_id}.down_proj.weight", tensor[expert_id]
+                        yield f"{base}.{expert_id}.down_proj.weight", tensor[expert_id].contiguous()
                     continue
                 yield name, tensor
 
