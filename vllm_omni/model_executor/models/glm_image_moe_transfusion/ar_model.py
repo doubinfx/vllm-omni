@@ -69,6 +69,11 @@ class GlmImageMoeMultiModalProcessor(BaseMultiModalProcessor):
 
     def apply(self, inputs, timing_ctx):
         del timing_ctx
+        if any(inputs.mm_data_items.get_all_counts().values()):
+            raise ValueError(
+                "Native GLM-Image AR currently supports text-to-image only; "
+                "reference or source images are not supported."
+            )
         tokenizer = self.info.get_tokenizer()
         prompt = inputs.prompt
         if not isinstance(prompt, str):

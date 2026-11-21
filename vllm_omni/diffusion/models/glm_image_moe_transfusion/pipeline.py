@@ -21,7 +21,6 @@ from vllm_omni.diffusion.models.glm_image_moe_transfusion.native_diffusion impor
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import (
     DiffusionPipelineProfilerMixin,
 )
-from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 logger = init_logger(__name__)
@@ -34,9 +33,7 @@ def _custom_arg(od_config: OmniDiffusionConfig, name: str) -> str | None:
 
 
 def _setting(od_config: OmniDiffusionConfig, name: str) -> str | None:
-    return _custom_arg(od_config, name) or os.environ.get(
-        f"GLM_IMAGE_MOE_{name.upper()}"
-    )
+    return _custom_arg(od_config, name) or os.environ.get(f"GLM_IMAGE_MOE_{name.upper()}")
 
 
 def _prompt_text(prompt: Any) -> str:
@@ -86,12 +83,10 @@ class GlmImageMoeTransfusionPipeline(nn.Module, DiffusionPipelineProfilerMixin):
         self.device = get_local_device()
         self.generator = NativeGlmImageGenerator(
             checkpoint=_setting(od_config, "checkpoint") or od_config.model,
-            stage_config=_setting(od_config, "stage_config")
-            or os.path.join(od_config.model, "stage_config"),
-            tokenizer_path=_setting(od_config, "tokenizer_path")
-            or os.path.join(od_config.model, "tokenizer"),
-            vae_path=_setting(od_config, "vae_path")
-            or os.path.join(od_config.model, "vae"),
+            stage_config=_setting(od_config, "stage_config") or os.path.join(od_config.model, "stage_config"),
+            tokenizer_path=_setting(od_config, "tokenizer_path") or os.path.join(od_config.model, "tokenizer"),
+            vae_path=_setting(od_config, "vae_path") or os.path.join(od_config.model, "vae"),
+            device=self.device,
             vae_device=_setting(od_config, "vae_device") or "npu:0",
         )
         self.setup_diffusion_pipeline_profiler(
@@ -134,13 +129,14 @@ class GlmImageMoeTransfusionPipeline(nn.Module, DiffusionPipelineProfilerMixin):
             seed,
             len(_generated_ids(prompt, req)),
         )
+        generated_ids = _generated_ids(prompt, req)
         image = self.generator.generate(
             prompt_text,
             height=height,
             width=width,
             num_steps=num_steps,
             seed=seed,
-            generated_ids=_generated_ids(prompt, req),
+            generated_ids=generated_ids,
         )
         return DiffusionOutput(
             output=image,
@@ -151,14 +147,3 @@ class GlmImageMoeTransfusionPipeline(nn.Module, DiffusionPipelineProfilerMixin):
         """The generator loads the shared checkpoint directly during construction."""
         del weights
         return {name for name, _ in self.named_parameters()}
-
-
-def get_glm_image_moe_transfusion_pre_process_func(
-    od_config: OmniDiffusionConfig,
-):
-    del od_config
-
-    def pre_process(request: OmniDiffusionRequest):
-        return request
-
-    return pre_process

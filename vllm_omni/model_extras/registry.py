@@ -35,6 +35,9 @@ from vllm_omni.model_extras.cosmos3_nano_sim_bimanual import (
 from vllm_omni.model_extras.glm_image_moe_transfusion import (
     build_text_to_image_tokenization as build_glm_image_moe_text_to_image_tokenization,
 )
+from vllm_omni.model_extras.glm_image_moe_transfusion import (
+    validate_glm_image_moe_tokenizer,
+)
 from vllm_omni.model_extras.helios import (
     HELIOS_EXTRA_BODY_PARAMS,
     HELIOS_EXTRA_OUTPUT_PARAMS,
@@ -377,9 +380,11 @@ _EXTRA_SPECS: dict[str, dict[str, Any]] = {
     },
     "GlmImageMoeTransfusionForCausalLM": {
         "text_to_image_tokenization_builder": (build_glm_image_moe_text_to_image_tokenization),
+        "ar_tokenizer_validator": validate_glm_image_moe_tokenizer,
     },
     "GlmImageMoeTransfusionPipeline": {
         "text_to_image_tokenization_builder": (build_glm_image_moe_text_to_image_tokenization),
+        "ar_tokenizer_validator": validate_glm_image_moe_tokenizer,
     },
     "MingImagePipeline": {
         "extra_body_params": MING_FLASH_OMNI_EXTRA_BODY_PARAMS,
