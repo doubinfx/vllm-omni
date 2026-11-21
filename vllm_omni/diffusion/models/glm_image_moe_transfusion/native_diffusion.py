@@ -237,6 +237,7 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         checkpoint: str,
         *,
         stage_config: str,
+        device: torch.device | None = None,
         max_memory_gib: int = 50,
     ) -> None:
         super().__init__()
@@ -261,7 +262,7 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         self.latent_channels = 32
         self.patch_size = 2
         self.anchor_patch_dim = self.latent_channels * self.patch_size**2
-        self.extra_device = torch.device("npu:0")
+        self.extra_device = device or torch.device("npu:0")
 
         self.diff_input_proj = nn.Linear(self.anchor_patch_dim, self.hidden_size)
         self.diff_output_proj = nn.Linear(self.hidden_size, self.anchor_patch_dim)
@@ -436,6 +437,7 @@ class NativeGlmImageGenerator:
         stage_config: str,
         tokenizer_path: str,
         vae_path: str,
+        device: torch.device | None = None,
         max_memory_gib: int = 50,
         vae_device: str = "npu:0",
     ) -> None:
@@ -447,6 +449,7 @@ class NativeGlmImageGenerator:
         self.model = NativeGlmImageMoeDiffusion(
             checkpoint,
             stage_config=stage_config,
+            device=device,
             max_memory_gib=max_memory_gib,
         )
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -502,7 +505,7 @@ class NativeGlmImageGenerator:
             generated_ids or (),
         )
         image_len = layout.grid_h * layout.grid_w
-        generator = torch.Generator(device="npu:0").manual_seed(seed)
+        generator = torch.Generator(device=self.model.extra_device).manual_seed(seed)
         latents = torch.randn(
             (image_len, self.model.anchor_patch_dim),
             generator=generator,

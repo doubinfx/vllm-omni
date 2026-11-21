@@ -12,8 +12,8 @@ from vllm_omni.model_executor.models.glm_image_moe_transfusion.prompt import (
     THINKING_TEMPLATE,
     USER_TOKEN_ID,
     build_ar_prefix_ids,
-    build_direct_prefix_ids,
     build_diffusion_layout,
+    build_direct_prefix_ids,
     trim_ar_output_ids,
 )
 
@@ -116,6 +116,10 @@ def test_build_direct_prefix_uses_resolution_suffix() -> None:
 
 def test_trim_ar_output_removes_trailing_image_markers() -> None:
     assert trim_ar_output_ids([10, 11, EOP_TOKEN_ID, BOI_TOKEN_ID]) == [10, 11]
+
+
+def test_trim_ar_output_removes_conversation_terminator() -> None:
+    assert trim_ar_output_ids([10, 11, USER_TOKEN_ID, 12]) == [10, 11]
 
 
 @pytest.mark.parametrize(
