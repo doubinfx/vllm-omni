@@ -7,10 +7,12 @@ from vllm_omni.model_executor.models.glm_image_moe_transfusion.prompt import (
     BOI_TOKEN_ID,
     EOP_TOKEN_ID,
     GEN_IMAGE_REQUEST_TOKEN_ID,
+    IMAGE_REQUEST_TEMPLATE,
     SOP_TOKEN_ID,
     THINKING_TEMPLATE,
     USER_TOKEN_ID,
     build_ar_prefix_ids,
+    build_direct_prefix_ids,
     build_diffusion_layout,
     trim_ar_output_ids,
 )
@@ -78,6 +80,38 @@ def test_build_diffusion_layout_replaces_model_shape_tail() -> None:
     assert layout.anchor == len(layout.input_ids) - 1
     assert layout.prefix_len == 5
     assert (layout.grid_h, layout.grid_w) == (32, 32)
+
+
+def test_build_diffusion_layout_uses_direct_prefix_without_thinking() -> None:
+    tokenizer = RecordingTokenizer()
+    layout = build_diffusion_layout(
+        tokenizer,
+        "a red cube",
+        height=512,
+        width=512,
+    )
+
+    assert layout.input_ids[:2] == (USER_TOKEN_ID, GEN_IMAGE_REQUEST_TOKEN_ID)
+    assert layout.input_ids[-3:] == (EOP_TOKEN_ID, BOI_TOKEN_ID, USER_TOKEN_ID)
+    assert tokenizer.calls == [
+        f"{IMAGE_REQUEST_TEMPLATE} a red cube h:512 w:512",
+        "<sop>32 32<eop>",
+    ]
+    assert not any(call.startswith(THINKING_TEMPLATE) for call in tokenizer.calls)
+
+
+def test_build_direct_prefix_uses_resolution_suffix() -> None:
+    tokenizer = RecordingTokenizer()
+    ids, user_text = build_direct_prefix_ids(
+        tokenizer,
+        "a red cube",
+        height=512,
+        width=512,
+    )
+
+    assert ids[:2] == [USER_TOKEN_ID, GEN_IMAGE_REQUEST_TOKEN_ID]
+    assert ids[-1] == ASSISTANT_TOKEN_ID
+    assert user_text == f"{IMAGE_REQUEST_TEMPLATE} a red cube h:512 w:512"
 
 
 def test_trim_ar_output_removes_trailing_image_markers() -> None:

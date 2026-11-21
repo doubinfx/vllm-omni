@@ -22,6 +22,7 @@ THINKING_TEMPLATE = (
     "and constraints, and resolve any ambiguities or inconsistencies. Explicitly "
     "present your analysis and generation plan before producing the final image:"
 )
+IMAGE_REQUEST_TEMPLATE = "Please generate an image according to the text below."
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,23 @@ def build_ar_prefix_ids(
     ], user_text
 
 
+def build_direct_prefix_ids(
+    tokenizer: Any,
+    prompt: str,
+    height: int,
+    width: int,
+) -> tuple[list[int], str]:
+    """Build the non-thinking T2I prefix used by the diffusion-only path."""
+    _validate_resolution(height, width)
+    user_text = f"{IMAGE_REQUEST_TEMPLATE} {prompt} h:{height} w:{width}"
+    return [
+        USER_TOKEN_ID,
+        GEN_IMAGE_REQUEST_TOKEN_ID,
+        *_encode(tokenizer, user_text),
+        ASSISTANT_TOKEN_ID,
+    ], user_text
+
+
 def trim_ar_output_ids(generated_ids: Iterable[int]) -> list[int]:
     """Remove any model-written shape/image tail before diffusion packing."""
     ids = [int(token_id) for token_id in generated_ids]
@@ -91,12 +109,16 @@ def build_diffusion_layout(
     The final ``<|user|>`` is the conversation terminator. The diffusion rows
     are inserted immediately before it by the native pipeline.
     """
-    prefix_ids, user_text = build_ar_prefix_ids(tokenizer, prompt, height, width)
+    thinking_ids = list(generated_ids)
+    if thinking_ids:
+        prefix_ids, user_text = build_ar_prefix_ids(tokenizer, prompt, height, width)
+    else:
+        prefix_ids, user_text = build_direct_prefix_ids(tokenizer, prompt, height, width)
     grid_h, grid_w = height // LATENT_SCALE, width // LATENT_SCALE
     shape_ids = _encode(tokenizer, f"<sop>{grid_h} {grid_w}<eop>")
     tokens = [
         *prefix_ids,
-        *trim_ar_output_ids(generated_ids),
+        *trim_ar_output_ids(thinking_ids),
         *shape_ids,
         BOI_TOKEN_ID,
         USER_TOKEN_ID,
