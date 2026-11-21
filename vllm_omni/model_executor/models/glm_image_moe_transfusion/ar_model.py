@@ -43,6 +43,29 @@ def _disable_mla_prolog_v3(model: torch.nn.Module) -> None:
         impl.supports_prolog_v3_writer = MethodType(lambda _self: False, impl)
 
 
+def _bootstrap_a2_mla_rope_cache(model: torch.nn.Module) -> None:
+    """Expose MRoPE tables to the legacy A2 MLA metadata builder."""
+    if not _is_ascend_a2():
+        return
+
+    for module in model.modules():
+        cos_sin_cache = getattr(module, "cos_sin_cache", None)
+        mrope_section = getattr(module, "mrope_section", None)
+        if cos_sin_cache is None or not mrope_section:
+            continue
+        cos_cache, sin_cache = cos_sin_cache.chunk(2, dim=-1)
+        if not module.is_neox_style:
+            # GLM-Image uses adjacent rotary pairs.  npu_interleave_rope
+            # pair-transposes D before RotateHalf, so its 64-wide tables repeat
+            # each half instead of repeating each coefficient twice.
+            cos_cache = torch.cat((cos_cache, cos_cache), dim=-1)
+            sin_cache = torch.cat((sin_cache, sin_cache), dim=-1)
+        from vllm_ascend.ops.rotary_embedding import _record_cos_and_sin_cache
+
+        _record_cos_and_sin_cache(cos_cache, sin_cache)
+        return
+
+
 class GlmImageMoeTransfusionForCausalLM(Glm4MoeLiteForCausalLM):
     """GLM4-MoE-lite causal LM over the shared GLM-Image checkpoint."""
 
@@ -99,4 +122,5 @@ class GlmImageMoeTransfusionForCausalLM(Glm4MoeLiteForCausalLM):
 
         loaded = super().load_weights(expand_ar_weights())
         _disable_mla_prolog_v3(self)
+        _bootstrap_a2_mla_rope_cache(self)
         return loaded
