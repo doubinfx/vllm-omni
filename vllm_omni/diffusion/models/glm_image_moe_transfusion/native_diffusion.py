@@ -11,12 +11,11 @@ import json
 import logging
 import math
 import re
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch_npu
 from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 from safetensors import safe_open
@@ -34,6 +33,27 @@ from vllm_omni.model_executor.models.glm_image_moe_transfusion.prompt import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _standard_conv_internal_format():
+    """Disable NZ format allocation only while running the serial VAE stage.
+
+    vLLM-Omni enables internal formats for fused Ascend kernels.  The FLUX.2
+    VAE uses ordinary Conv2D, for which CANN 9.2 on A2 cannot select an engine
+    while internal formats are enabled.
+    """
+    if not torch.npu.is_available():
+        yield
+        return
+
+    previous = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
+    was_enabled = previous in (b"enable", "enable")
+    torch.npu.config.allow_internal_format = False
+    try:
+        yield
+    finally:
+        torch.npu.config.allow_internal_format = was_enabled
 
 
 def _remap_flux2_vae_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -112,11 +132,7 @@ class _TimestepEmbedding(nn.Module):
 
     def forward(self, timesteps: torch.Tensor) -> torch.Tensor:
         half = self.freq_dim // 2
-        freqs = torch.exp(
-            -math.log(10000.0)
-            * torch.arange(half, dtype=torch.float32, device=timesteps.device)
-            / half
-        )
+        freqs = torch.exp(-math.log(10000.0) * torch.arange(half, dtype=torch.float32, device=timesteps.device) / half)
         args = timesteps.float().unsqueeze(-1) * freqs.unsqueeze(0)
         embedding = torch.cat((args.cos(), args.sin()), dim=-1)
         return self.mlp(embedding.to(self.mlp[0].weight.dtype))
@@ -290,11 +306,7 @@ class NativeGlmImageMoeDiffusion(nn.Module):
             with safe_open(self.checkpoint / shard, framework="pt", device="cpu") as handle:
                 state[name] = handle.get_tensor(name)
         missing, unexpected = self.load_state_dict(state, strict=False)
-        ignored = {
-            name
-            for name in missing
-            if name.startswith("backbone.") or ".weight" not in name
-        }
+        ignored = {name for name in missing if name.startswith("backbone.") or ".weight" not in name}
         real_missing = set(missing) - ignored
         if real_missing or unexpected:
             raise RuntimeError(
@@ -462,19 +474,12 @@ class NativeGlmImageGenerator:
             strict=False,
         )
         if missing or unexpected:
-            raise RuntimeError(
-                f"Flux2 VAE weight mismatch: missing={sorted(missing)} "
-                f"unexpected={sorted(unexpected)}"
-            )
+            raise RuntimeError(f"Flux2 VAE weight mismatch: missing={sorted(missing)} unexpected={sorted(unexpected)}")
         self.vae_device = torch.device(vae_device)
         self.vae.to(self.vae_device).eval()
 
     def _timesteps(self, sequence_length: int, steps: int) -> torch.Tensor:
-        alpha = math.exp(
-            1.15
-            + (1.8 - 1.15)
-            * ((sequence_length - 4096) / (16384 - 4096))
-        )
+        alpha = math.exp(1.15 + (1.8 - 1.15) * ((sequence_length - 4096) / (16384 - 4096)))
         raw = torch.linspace(1.0, 0.0, steps + 1)
         return alpha * raw / (1 + (alpha - 1) * raw)
 
@@ -518,9 +523,7 @@ class NativeGlmImageGenerator:
                 device=self.model.extra_device,
                 dtype=torch.float32,
             )
-            latents = (
-                (1.0 - next_step.float()) * x0 + next_step.float() * noise
-            ).to(latents.dtype)
+            latents = ((1.0 - next_step.float()) * x0 + next_step.float() * noise).to(latents.dtype)
 
         packed = latents.view(
             1,
@@ -549,9 +552,11 @@ class NativeGlmImageGenerator:
         )
         mean = self.vae.bn.running_mean.to(patched.device, patched.dtype).view(1, -1, 1, 1)
         std = (
-            self.vae.bn.running_var.to(patched.device, torch.float32)
-            + self.vae.bn.eps
-        ).sqrt().to(patched.dtype).view(1, -1, 1, 1)
+            (self.vae.bn.running_var.to(patched.device, torch.float32) + self.vae.bn.eps)
+            .sqrt()
+            .to(patched.dtype)
+            .view(1, -1, 1, 1)
+        )
         patched = patched * std + mean
         latents = (
             patched.view(1, channels, p, p, latent_h // p, latent_w // p)
@@ -564,5 +569,6 @@ class NativeGlmImageGenerator:
             latents.dtype,
             latents.device,
         )
-        decoded = self.vae.decode(latents, return_dict=False)[0]
+        with _standard_conv_internal_format():
+            decoded = self.vae.decode(latents, return_dict=False)[0]
         return decoded.clamp(-1.0, 1.0)

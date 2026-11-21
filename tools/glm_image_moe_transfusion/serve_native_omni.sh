@@ -17,7 +17,7 @@ export GLM_IMAGE_MOE_CHECKPOINT="${ROOT}/g/dmd2_lyzsft10000_s2000"
 export GLM_IMAGE_MOE_STAGE_CONFIG="${ROOT}/native_stages_v2/ar"
 export GLM_IMAGE_MOE_TOKENIZER_PATH="${ROOT}/assets/glm_image_tokenizer"
 export GLM_IMAGE_MOE_VAE_PATH="${ROOT}/assets/mnt/cogview_data_cloud/zwd/ckpt/flux2_vae_hf"
-export GLM_IMAGE_MOE_VAE_DEVICE="${GLM_IMAGE_MOE_VAE_DEVICE:-cpu}"
+export GLM_IMAGE_MOE_VAE_DEVICE="${GLM_IMAGE_MOE_VAE_DEVICE:-npu:0}"
 
 exec vllm-omni serve "${MODEL_CONFIG}" \
   --omni \
