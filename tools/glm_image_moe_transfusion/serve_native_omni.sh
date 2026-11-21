@@ -24,4 +24,5 @@ exec vllm-omni serve "${MODEL_CONFIG}" \
   --host "${HOST}" \
   --port "${PORT}" \
   --trust-remote-code \
-  --enforce-eager
+  --enforce-eager \
+  "$@"

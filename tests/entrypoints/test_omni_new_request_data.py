@@ -86,6 +86,28 @@ def test_from_base_preserves_every_upstream_field_and_adds_omni_payloads():
     assert data.model_intermediate_buffer == {"hidden": "state"}
 
 
+def test_from_base_backfills_mr_v2_prefill_token_ids():
+    base = NewRequestData(
+        req_id="req-v2-backfill",
+        prompt_token_ids=[11, 12, 13],
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([5],),
+        num_computed_tokens=0,
+        lora_request=None,
+        prompt_embeds=None,
+        prompt_is_token_ids=None,
+        prefill_token_ids=None,
+    )
+    request = SimpleNamespace(_all_token_ids=[11, 12, 13, 14])
+
+    data = OmniNewRequestData.from_base(base, request)
+
+    assert data.prompt_token_ids == [11, 12, 13]
+    assert data.prefill_token_ids == [11, 12, 13, 14]
+
+
 def test_rewrap_converts_fallback_entries_and_keeps_fast_path_entries():
     base = NewRequestData(
         req_id="req-fallback",
