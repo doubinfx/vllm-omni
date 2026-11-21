@@ -22,6 +22,7 @@ from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import (
     DiffusionPipelineProfilerMixin,
 )
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 logger = init_logger(__name__)
 
@@ -44,8 +45,8 @@ def _prompt_text(prompt: Any) -> str:
     return str(getattr(prompt, "prompt", "") or "")
 
 
-def _generated_ids(prompt: Any, req: DiffusionRequestBatch) -> list[int]:
-    extra = req.sampling_params.extra_args or {}
+def _generated_ids(prompt: Any, sampling_params: OmniDiffusionSamplingParams) -> list[int]:
+    extra = sampling_params.extra_args or {}
     value = extra.get("generated_token_ids")
     if value is None and isinstance(prompt, dict):
         value = (prompt.get("extra") or {}).get("generated_token_ids")
@@ -70,6 +71,8 @@ def get_glm_image_moe_transfusion_post_process_func(
 
 class GlmImageMoeTransfusionPipeline(nn.Module, DiffusionPipelineProfilerMixin):
     """Translate a diffusion request into the native GLM-Image generator."""
+
+    supports_request_batch = True
 
     def __init__(
         self,
@@ -98,50 +101,89 @@ class GlmImageMoeTransfusionPipeline(nn.Module, DiffusionPipelineProfilerMixin):
         return self.generator.model.backbone.dtype
 
     @torch.inference_mode()
-    def forward(self, req: DiffusionRequestBatch) -> DiffusionOutput:
+    def forward(self, req: DiffusionRequestBatch) -> list[DiffusionOutput]:
         if not req.prompts:
             raise ValueError("GLM-Image diffusion request is missing a prompt")
-        prompt = req.prompts[0]
-        prompt_text = _prompt_text(prompt)
-        if not prompt_text:
+        prompt_texts = [_prompt_text(prompt) for prompt in req.prompts]
+        if any(not prompt_text for prompt_text in prompt_texts):
             raise ValueError("GLM-Image diffusion prompt must not be empty")
 
         is_dummy = req.is_dummy_run()
-        height = req.sampling_params.height or 1024
-        width = req.sampling_params.width or 1024
-        num_steps = req.sampling_params.num_inference_steps or 4
-        seed = req.sampling_params.seed if req.sampling_params.seed is not None else 0
         if is_dummy:
             # A2 lacks a VAE Conv2D kernel for the tiny 64x64 warmup shape.
             # Model construction and checkpoint loading already completed, so
             # return a shape-only response for the engine's internal probe.
-            image = torch.zeros((1, 3, 64, 64), device=self.device, dtype=self.dtype)
-            return DiffusionOutput(
-                output=image,
-                stage_durations=getattr(self, "stage_durations", None),
-            )
+            return [
+                DiffusionOutput(
+                    output=torch.zeros((1, 3, 64, 64), device=self.device, dtype=self.dtype),
+                    stage_durations=getattr(self, "stage_durations", None),
+                )
+                for _ in req.prompts
+            ]
+
+        common = req.sampling_params_list[0]
+        height = common.height or 1024
+        width = common.width or 1024
+        num_steps = common.num_inference_steps or 4
+        for sampling_params in req.sampling_params_list[1:]:
+            if (
+                (sampling_params.height or 1024) != height
+                or (sampling_params.width or 1024) != width
+                or (sampling_params.num_inference_steps or 4) != num_steps
+            ):
+                raise ValueError("GLM-Image request batch requires common size and inference-step settings")
+
+        batch_prompts: list[str] = []
+        batch_generated_ids: list[list[int]] = []
+        batch_seeds: list[int] = []
+        outputs_per_request: list[int] = []
+        for prompt, prompt_text, sampling_params in zip(
+            req.prompts,
+            prompt_texts,
+            req.sampling_params_list,
+            strict=True,
+        ):
+            num_outputs = max(1, int(sampling_params.num_outputs_per_prompt or 1))
+            seed = sampling_params.seed if sampling_params.seed is not None else 0
+            generated_ids = _generated_ids(prompt, sampling_params)
+            outputs_per_request.append(num_outputs)
+            for output_index in range(num_outputs):
+                batch_prompts.append(prompt_text)
+                batch_generated_ids.append(generated_ids)
+                batch_seeds.append(int(seed) + output_index)
 
         logger.info(
-            "Native GLM-Image request: size=%sx%s steps=%s seed=%s generated_ids=%s",
+            "Native GLM-Image batch: requests=%s samples=%s size=%sx%s steps=%s",
+            req.num_reqs,
+            len(batch_prompts),
             height,
             width,
             num_steps,
-            seed,
-            len(_generated_ids(prompt, req)),
         )
-        generated_ids = _generated_ids(prompt, req)
-        image = self.generator.generate(
-            prompt_text,
+        images = self.generator.generate_batch(
+            batch_prompts,
             height=height,
             width=width,
             num_steps=num_steps,
-            seed=seed,
-            generated_ids=generated_ids,
+            seeds=batch_seeds,
+            generated_ids=batch_generated_ids,
         )
-        return DiffusionOutput(
-            output=image,
-            stage_durations=getattr(self, "stage_durations", None),
-        )
+        outputs: list[DiffusionOutput] = []
+        offset = 0
+        for num_outputs in outputs_per_request:
+            sample_indices = torch.arange(
+                offset,
+                offset + num_outputs,
+                device=images.device,
+            )
+            outputs.append(
+                DiffusionOutput(
+                    output=torch.index_select(images, 0, sample_indices),
+                    stage_durations=getattr(self, "stage_durations", None),
+                )
+            )
+            offset += num_outputs
+        return outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """The generator loads the shared checkpoint directly during construction."""

@@ -181,8 +181,13 @@ def _select_mrope(
     sections: list[int],
     layout: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Select one T/H/W axis per rotary dimension and return [1,L,D] tables."""
-    freqs = position_ids.float().unsqueeze(-1) * inv_freq.to(position_ids.device)
+    """Select one T/H/W axis per rotary dimension for one or more sequences."""
+    single_request = position_ids.ndim == 2
+    if single_request:
+        position_ids = position_ids.unsqueeze(1)
+        image_mask = image_mask.unsqueeze(0)
+
+    freqs = position_ids.float().unsqueeze(-1) * inv_freq.to(position_ids.device).view(1, 1, 1, -1)
     emb = torch.cat((freqs, freqs), dim=-1)
     cos = emb.cos()
     sin = emb.sin()
@@ -190,42 +195,64 @@ def _select_mrope(
     text_axis = _mrope_axis_pattern(sections, "block")
     image_axis = _mrope_axis_pattern(sections, layout)
     axis = torch.where(
-        image_mask.to(cos.device)[:, None],
-        torch.tensor(image_axis, dtype=torch.long, device=cos.device)[None, :],
-        torch.tensor(text_axis, dtype=torch.long, device=cos.device)[None, :],
+        image_mask.to(cos.device)[:, :, None],
+        torch.tensor(image_axis, dtype=torch.long, device=cos.device)[None, None, :],
+        torch.tensor(text_axis, dtype=torch.long, device=cos.device)[None, None, :],
     )
     # Ascend's gather on a permuted [3,L,D] table can collapse every frequency
     # to the first column. Select the three axes explicitly instead.
-    cos = cos.permute(1, 0, 2)
-    sin = sin.permute(1, 0, 2)
+    cos = cos.permute(1, 2, 0, 3)
+    sin = sin.permute(1, 2, 0, 3)
     cos = torch.where(
         axis == 0,
-        cos[:, 0, :],
-        torch.where(axis == 1, cos[:, 1, :], cos[:, 2, :]),
+        cos[:, :, 0, :],
+        torch.where(axis == 1, cos[:, :, 1, :], cos[:, :, 2, :]),
     )
     sin = torch.where(
         axis == 0,
-        sin[:, 0, :],
-        torch.where(axis == 1, sin[:, 1, :], sin[:, 2, :]),
+        sin[:, :, 0, :],
+        torch.where(axis == 1, sin[:, :, 1, :], sin[:, :, 2, :]),
     )
-    return cos.unsqueeze(0).contiguous(), sin.unsqueeze(0).contiguous()
+    if single_request:
+        return cos[0:1].contiguous(), sin[0:1].contiguous()
+    return cos.contiguous(), sin.contiguous()
 
 
 def _packed_attention_mask(text_len: int, image_len: int, device: torch.device) -> torch.Tensor:
     """Text is causal; generated latent rows see text and all latent rows."""
-    length = text_len + image_len
-    allowed = torch.zeros((length, length), dtype=torch.bool, device=device)
-    text_indices = torch.arange(text_len, device=device)
-    allowed[:text_len, :text_len] = text_indices[:, None] >= text_indices[None, :]
-    allowed[text_len:, :text_len] = True
-    allowed[text_len:, text_len:] = True
+    return _batched_packed_attention_mask([text_len], text_len, image_len, device)
+
+
+def _batched_packed_attention_mask(
+    text_lengths: list[int],
+    padded_text_len: int,
+    image_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build isolated attention blocks for a heterogeneous text batch."""
+    if not text_lengths or any(length <= 0 or length > padded_text_len for length in text_lengths):
+        raise ValueError("text lengths must be positive and no larger than the padded text length")
+
+    batch_size = len(text_lengths)
+    total_length = padded_text_len + image_len
+    allowed = torch.zeros((batch_size, total_length, total_length), dtype=torch.bool, device=device)
+    image_start = padded_text_len
+    image_stop = image_start + image_len
+    for batch_index, text_len in enumerate(text_lengths):
+        text_indices = torch.arange(text_len, device=device)
+        allowed[batch_index, :text_len, :text_len] = text_indices[:, None] >= text_indices[None, :]
+        allowed[batch_index, image_start:image_stop, :text_len] = True
+        allowed[batch_index, image_start:image_stop, image_start:image_stop] = True
+        if text_len < padded_text_len:
+            padding = torch.arange(text_len, padded_text_len, device=device)
+            allowed[batch_index, padding, padding] = True
     mask = torch.full(
-        (1, 1, length, length),
+        (batch_size, 1, total_length, total_length),
         torch.finfo(torch.bfloat16).min,
         dtype=torch.bfloat16,
         device=device,
     )
-    mask.masked_fill_(allowed, 0)
+    mask.masked_fill_(allowed.unsqueeze(1), 0)
     return mask
 
 
@@ -371,33 +398,75 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         )
         return position_ids, image_mask, image_len
 
-    def predict_velocity(
+    def _batched_position_tensors(
         self,
-        layout: GlmImageTokenLayout,
-        latents: torch.Tensor,
-        timestep: torch.Tensor,
-    ) -> torch.Tensor:
-        input_ids = torch.tensor(
-            layout.input_ids[: layout.anchor],
+        layouts: list[GlmImageTokenLayout],
+        padded_text_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        image_lengths = {layout.grid_h * layout.grid_w for layout in layouts}
+        if len(image_lengths) != 1:
+            raise ValueError(f"request batch has incompatible image lengths: {sorted(image_lengths)}")
+        image_len = image_lengths.pop()
+        batch_size = len(layouts)
+        position_ids = torch.zeros(
+            (3, batch_size, padded_text_len + image_len),
             dtype=torch.long,
             device=self.extra_device,
-        ).unsqueeze(0)
+        )
+        image_mask = torch.zeros(
+            (batch_size, padded_text_len + image_len),
+            dtype=torch.bool,
+            device=self.extra_device,
+        )
+        for batch_index, layout in enumerate(layouts):
+            layout_positions, layout_image_mask, layout_image_len = self._position_tensors(layout)
+            if layout_image_len != image_len:
+                raise ValueError(f"latent image length {layout_image_len} != batch image length {image_len}")
+            text_len = layout.anchor
+            position_ids[:, batch_index, :text_len] = layout_positions[:, :text_len]
+            position_ids[:, batch_index, padded_text_len:] = layout_positions[:, text_len:]
+            image_mask[batch_index, padded_text_len:] = layout_image_mask[text_len:]
+        return position_ids, image_mask, image_len
+
+    def _predict_velocity_batch(
+        self,
+        layouts: list[GlmImageTokenLayout],
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        if len(layouts) != latents.shape[0] or len(layouts) != timesteps.numel():
+            raise ValueError("layout, latent, and timestep batch sizes must match")
+        text_lengths = [layout.anchor for layout in layouts]
+        padded_text_len = max(text_lengths)
+        input_ids = torch.zeros(
+            (len(layouts), padded_text_len),
+            dtype=torch.long,
+            device=self.extra_device,
+        )
+        for batch_index, layout in enumerate(layouts):
+            input_ids[batch_index, : layout.anchor] = torch.tensor(
+                layout.input_ids[: layout.anchor],
+                dtype=torch.long,
+                device=self.extra_device,
+            )
         text_hidden = self.backbone.model.embed_tokens(input_ids)
 
-        position_ids, image_mask, image_len = self._position_tensors(layout)
-        if latents.shape[0] != image_len:
-            raise ValueError(f"latent rows {latents.shape[0]} != image grid {image_len}")
-        time_embedding = self.diff_time_embed(timestep.float() * 1000.0)
+        position_ids, image_mask, image_len = self._batched_position_tensors(layouts, padded_text_len)
+        if latents.shape[1] != image_len:
+            raise ValueError(f"latent rows {latents.shape[1]} != image grid {image_len}")
+        time_embedding = self.diff_time_embed(timesteps.reshape(-1).float() * 1000.0)
         scale, shift = self.diff_adaln_in(time_embedding).chunk(2, dim=-1)
+        scale = scale.unsqueeze(1)
+        shift = shift.unsqueeze(1)
         image_hidden = self.diff_input_proj(latents)
         image_hidden = _adaln_apply(
             image_hidden,
             scale,
             shift,
             self.rms_eps,
-        ).unsqueeze(0)
+        )
 
-        hidden_states = torch.cat((text_hidden[0], image_hidden[0]), dim=0).unsqueeze(0)
+        hidden_states = torch.cat((text_hidden, image_hidden), dim=1)
         cos, sin = _select_mrope(
             position_ids,
             image_mask,
@@ -407,7 +476,12 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         )
         cos = cos.to(hidden_states.dtype)
         sin = sin.to(hidden_states.dtype)
-        attention_mask = _packed_attention_mask(layout.anchor, image_len, self.extra_device)
+        attention_mask = _batched_packed_attention_mask(
+            text_lengths,
+            padded_text_len,
+            image_len,
+            self.extra_device,
+        )
 
         for layer in self.backbone.model.layers:
             hidden_states = layer(
@@ -416,15 +490,37 @@ class NativeGlmImageMoeDiffusion(nn.Module):
                 position_embeddings=(cos, sin),
             )
         hidden_states = self.backbone.model.norm(hidden_states)
-        image_hidden = hidden_states[:, -image_len:].to(self.extra_device)
+        image_indices = torch.arange(
+            padded_text_len,
+            padded_text_len + image_len,
+            device=hidden_states.device,
+        )
+        # A2 cannot lower a BF16 basic slice here, so use index_select rather
+        # than ``hidden_states[:, -image_len:]``.
+        image_hidden = torch.index_select(hidden_states, 1, image_indices).to(self.extra_device)
         output_scale, output_shift = self.diff_adaln_out(time_embedding).chunk(2, dim=-1)
+        output_scale = output_scale.unsqueeze(1)
+        output_shift = output_shift.unsqueeze(1)
         image_hidden = _adaln_apply(
             image_hidden,
             output_scale,
             output_shift,
             self.rms_eps,
         )
-        return self.diff_output_proj(image_hidden).squeeze(0)
+        return self.diff_output_proj(image_hidden)
+
+    def predict_velocity(
+        self,
+        layout: GlmImageTokenLayout,
+        latents: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        velocity = self._predict_velocity_batch(
+            [layout],
+            latents.unsqueeze(0),
+            timestep.reshape(1),
+        )
+        return velocity[0]
 
 
 class NativeGlmImageGenerator:
@@ -486,48 +582,7 @@ class NativeGlmImageGenerator:
         raw = torch.linspace(1.0, 0.0, steps + 1)
         return alpha * raw / (1 + (alpha - 1) * raw)
 
-    @torch.no_grad()
-    def generate(
-        self,
-        prompt: str,
-        *,
-        height: int = 512,
-        width: int = 512,
-        num_steps: int = 4,
-        seed: int = 1234,
-        generated_ids: list[int] | None = None,
-    ) -> torch.Tensor:
-        layout = build_diffusion_layout(
-            self.tokenizer,
-            prompt,
-            height,
-            width,
-            generated_ids or (),
-        )
-        image_len = layout.grid_h * layout.grid_w
-        generator = torch.Generator(device=self.model.extra_device).manual_seed(seed)
-        latents = torch.randn(
-            (image_len, self.model.anchor_patch_dim),
-            generator=generator,
-            device=self.model.extra_device,
-            dtype=torch.bfloat16,
-        )
-        timesteps = self._timesteps(image_len, num_steps)
-        for step in range(num_steps):
-            current = timesteps[step].to(self.model.extra_device)
-            next_step = timesteps[step + 1].to(self.model.extra_device)
-            velocity = self.model.predict_velocity(layout, latents, current.view(1))
-            # GLM-Image's DMD2 student uses the renoise sampler:
-            # x0 = x_t - t*v, then x_t-1 = (1-t_next)*x0 + t_next*eps.
-            x0 = latents.float() - current.float() * velocity.float()
-            noise = torch.randn(
-                x0.shape,
-                generator=generator,
-                device=self.model.extra_device,
-                dtype=torch.float32,
-            )
-            latents = ((1.0 - next_step.float()) * x0 + next_step.float() * noise).to(latents.dtype)
-
+    def _decode_latents(self, latents: torch.Tensor, layout: GlmImageTokenLayout) -> torch.Tensor:
         packed = latents.view(
             1,
             layout.grid_h,
@@ -575,3 +630,99 @@ class NativeGlmImageGenerator:
         with _standard_conv_internal_format():
             decoded = self.vae.decode(latents, return_dict=False)[0]
         return decoded.clamp(-1.0, 1.0)
+
+    @torch.no_grad()
+    def generate_batch(
+        self,
+        prompts: list[str],
+        *,
+        height: int = 512,
+        width: int = 512,
+        num_steps: int = 4,
+        seeds: list[int] | None = None,
+        generated_ids: list[list[int]] | None = None,
+    ) -> torch.Tensor:
+        """Generate several requests with one batched denoising forward path."""
+        if not prompts:
+            raise ValueError("GLM-Image batch must contain at least one prompt")
+        if seeds is None:
+            seeds = [0] * len(prompts)
+        if generated_ids is None:
+            generated_ids = [[] for _ in prompts]
+        if len(seeds) != len(prompts) or len(generated_ids) != len(prompts):
+            raise ValueError("prompt, seed, and generated-token batch sizes must match")
+
+        layouts = [
+            build_diffusion_layout(self.tokenizer, prompt, height, width, ids)
+            for prompt, ids in zip(prompts, generated_ids, strict=True)
+        ]
+        image_lengths = {layout.grid_h * layout.grid_w for layout in layouts}
+        if len(image_lengths) != 1:
+            raise ValueError(f"GLM-Image batch has incompatible image lengths: {sorted(image_lengths)}")
+        image_len = image_lengths.pop()
+        generators = [
+            torch.Generator(device=self.model.extra_device).manual_seed(int(seed))
+            for seed in seeds
+        ]
+        latents = torch.stack(
+            [
+                torch.randn(
+                    (image_len, self.model.anchor_patch_dim),
+                    generator=generator,
+                    device=self.model.extra_device,
+                    dtype=torch.bfloat16,
+                )
+                for generator in generators
+            ],
+            dim=0,
+        )
+        timesteps = self._timesteps(image_len, num_steps)
+        batch_size = len(layouts)
+        for step in range(num_steps):
+            current = timesteps[step].to(self.model.extra_device).expand(batch_size)
+            next_step = timesteps[step + 1].to(self.model.extra_device)
+            velocity = self.model._predict_velocity_batch(layouts, latents, current)
+            # GLM-Image's DMD2 student uses the renoise sampler:
+            # x0 = x_t - t*v, then x_t-1 = (1-t_next)*x0 + t_next*eps.
+            x0 = latents.float() - current.view(batch_size, 1, 1).float() * velocity.float()
+            noise = torch.stack(
+                [
+                    torch.randn(
+                        x0[batch_index].shape,
+                        generator=generator,
+                        device=self.model.extra_device,
+                        dtype=torch.float32,
+                    )
+                    for batch_index, generator in enumerate(generators)
+                ],
+                dim=0,
+            )
+            latents = ((1.0 - next_step.float()) * x0 + next_step.float() * noise).to(latents.dtype)
+
+        # Decode independently to keep the A2 VAE activation peak bounded.
+        return torch.cat(
+            [
+                self._decode_latents(latents.select(0, index).unsqueeze(0), layout)
+                for index, layout in enumerate(layouts)
+            ],
+            dim=0,
+        )
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        height: int = 512,
+        width: int = 512,
+        num_steps: int = 4,
+        seed: int = 1234,
+        generated_ids: list[int] | None = None,
+    ) -> torch.Tensor:
+        return self.generate_batch(
+            [prompt],
+            height=height,
+            width=width,
+            num_steps=num_steps,
+            seeds=[seed],
+            generated_ids=[generated_ids or []],
+        )[0]
