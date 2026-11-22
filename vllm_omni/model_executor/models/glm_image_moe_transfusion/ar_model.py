@@ -9,7 +9,6 @@ shared checkpoint without duplicating weights on disk.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from types import MethodType
 from typing import Any
 
 import torch
@@ -22,8 +21,12 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
 )
 
+from vllm_omni.model_executor.models.glm_image_moe_transfusion.ascend_compat import (
+    configure_a2_ar_model,
+)
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.prompt import (
     build_ar_prefix_ids,
+    validate_glm_image_moe_tokenizer,
 )
 
 
@@ -75,6 +78,7 @@ class GlmImageMoeMultiModalProcessor(BaseMultiModalProcessor):
                 "reference or source images are not supported."
             )
         tokenizer = self.info.get_tokenizer()
+        validate_glm_image_moe_tokenizer(tokenizer)
         prompt = inputs.prompt
         if not isinstance(prompt, str):
             prompt = tokenizer.decode(prompt, skip_special_tokens=False)
@@ -89,56 +93,6 @@ class GlmImageMoeMultiModalProcessor(BaseMultiModalProcessor):
             "mm_hashes": {},
             "mm_placeholders": {},
         }
-
-
-def _is_ascend_a2() -> bool:
-    npu = getattr(torch, "npu", None)
-    if npu is None or not npu.is_available():
-        return False
-    device_name = npu.get_device_name(npu.current_device()).upper()
-    return "910B" in device_name
-
-
-def _disable_mla_prolog_v3(model: torch.nn.Module) -> None:
-    """Use the legacy MLA preprocessing that A2 can execute.
-
-    vLLM-Ascend's PROLOG_V3 path converts ``weight_uq_qr`` to FRACTAL_NZ
-    during weight loading.  On A2/CANN 9.2 the required TransData kernel is
-    unavailable for this GLM-Image MLA geometry.  Apply the fallback only to
-    this adapter's own attention modules so other GLM-Image variants and
-    models retain their platform default.
-    """
-    if not _is_ascend_a2():
-        return
-
-    for module in model.modules():
-        impl: Any = getattr(module, "impl", None)
-        if not callable(getattr(impl, "supports_prolog_v3_writer", None)):
-            continue
-        impl.supports_prolog_v3_writer = MethodType(lambda _self: False, impl)
-
-
-def _bootstrap_a2_mla_rope_cache(model: torch.nn.Module) -> None:
-    """Expose MRoPE tables to the legacy A2 MLA metadata builder."""
-    if not _is_ascend_a2():
-        return
-
-    for module in model.modules():
-        cos_sin_cache = getattr(module, "cos_sin_cache", None)
-        mrope_section = getattr(module, "mrope_section", None)
-        if cos_sin_cache is None or not mrope_section:
-            continue
-        cos_cache, sin_cache = cos_sin_cache.chunk(2, dim=-1)
-        if not module.is_neox_style:
-            # GLM-Image uses adjacent rotary pairs.  npu_interleave_rope
-            # pair-transposes D before RotateHalf, so its 64-wide tables repeat
-            # each half instead of repeating each coefficient twice.
-            cos_cache = torch.cat((cos_cache, cos_cache), dim=-1)
-            sin_cache = torch.cat((sin_cache, sin_cache), dim=-1)
-        from vllm_ascend.ops.rotary_embedding import _record_cos_and_sin_cache
-
-        _record_cos_and_sin_cache(cos_cache, sin_cache)
-        return
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -228,6 +182,5 @@ class GlmImageMoeTransfusionForCausalLM(
                 yield name, tensor
 
         loaded = super().load_weights(expand_ar_weights())
-        _disable_mla_prolog_v3(self)
-        _bootstrap_a2_mla_rope_cache(self)
+        configure_a2_ar_model(self)
         return loaded

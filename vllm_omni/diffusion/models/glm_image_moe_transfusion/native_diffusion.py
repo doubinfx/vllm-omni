@@ -11,12 +11,12 @@ import json
 import logging
 import math
 import re
-from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
+from types import MethodType
 
 import torch
 import torch.nn as nn
-import torch_npu
 from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 from safetensors import safe_open
 from safetensors.torch import load_file
@@ -27,33 +27,22 @@ from transformers import (
     Glm4MoeLiteForCausalLM,
 )
 
+from vllm_omni.diffusion.models.glm_image_moe_transfusion.a2_kernels import (
+    a2_attention_forward,
+    a2_moe_forward,
+    use_a2_fused_attention,
+    use_a2_fused_moe,
+)
+from vllm_omni.model_executor.models.glm_image_moe_transfusion.ascend_compat import (
+    configure_a2_diffusion,
+    standard_conv_internal_format,
+)
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.prompt import (
     GlmImageTokenLayout,
     build_diffusion_layout,
 )
 
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def _standard_conv_internal_format():
-    """Disable NZ format allocation only while running the serial VAE stage.
-
-    vLLM-Omni enables internal formats for fused Ascend kernels.  The FLUX.2
-    VAE uses ordinary Conv2D, for which CANN 9.2 on A2 cannot select an engine
-    while internal formats are enabled.
-    """
-    if not torch.npu.is_available():
-        yield
-        return
-
-    previous = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
-    was_enabled = previous in (b"enable", "enable")
-    torch.npu.config.allow_internal_format = False
-    try:
-        yield
-    finally:
-        torch.npu.config.allow_internal_format = was_enabled
 
 
 def _remap_flux2_vae_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -296,6 +285,61 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         )
         self.rope_sections = list(rope_parameters["mrope_section"])
         self.rope_layout = "qwen3"
+        self.fused_attention = use_a2_fused_attention()
+        self.fused_moe = use_a2_fused_moe()
+        self._npu_attention_mask: torch.Tensor | None = None
+        if self.fused_attention or self.fused_moe:
+            self._install_module_adapters()
+        logger.info(
+            "Native GLM-Image A2 kernels: attention=%s moe=%s",
+            self.fused_attention,
+            self.fused_moe,
+        )
+
+    def _install_module_adapters(self) -> None:
+        for layer in self.backbone.model.layers:
+            if self.fused_attention:
+                self._wrap_attention(layer.self_attn)
+            if self.fused_moe:
+                self._wrap_mlp(layer.mlp)
+
+    def _wrap_attention(self, attention: nn.Module) -> None:
+        original_forward = attention.forward
+
+        @wraps(original_forward)
+        def attention_forward(
+            module: nn.Module,
+            hidden_states: torch.Tensor,
+            position_embeddings: tuple[torch.Tensor, torch.Tensor],
+            attention_mask: torch.Tensor | None = None,
+            past_key_values: object | None = None,
+            use_cache: bool | None = False,
+            **kwargs: object,
+        ):
+            del attention_mask, use_cache, kwargs
+            if self._npu_attention_mask is None:
+                raise RuntimeError("A2 fused attention requires a packed attention mask")
+            if past_key_values is not None:
+                raise RuntimeError("A2 fused attention does not support KV cache")
+            return a2_attention_forward(
+                module,
+                hidden_states,
+                self._npu_attention_mask,
+                position_embeddings,
+            )
+
+        attention.forward = MethodType(attention_forward, attention)
+
+    def _wrap_mlp(self, mlp: nn.Module) -> None:
+        original_forward = mlp.forward
+
+        @wraps(original_forward)
+        def mlp_forward(module: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+            if hasattr(module, "experts"):
+                return a2_moe_forward(module, hidden_states)
+            return original_forward(hidden_states)
+
+        mlp.forward = MethodType(mlp_forward, mlp)
 
     def _load_extra_weights(self) -> None:
         index = json.loads((self.checkpoint / "model.safetensors.index.json").read_text())
@@ -408,6 +452,7 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         cos = cos.to(hidden_states.dtype)
         sin = sin.to(hidden_states.dtype)
         attention_mask = _packed_attention_mask(layout.anchor, image_len, self.extra_device)
+        self._npu_attention_mask = attention_mask[0, 0] < 0 if self.fused_attention else None
 
         for layer in self.backbone.model.layers:
             hidden_states = layer(
@@ -416,7 +461,14 @@ class NativeGlmImageMoeDiffusion(nn.Module):
                 position_embeddings=(cos, sin),
             )
         hidden_states = self.backbone.model.norm(hidden_states)
-        image_hidden = hidden_states[:, -image_len:].to(self.extra_device)
+        image_indices = torch.arange(
+            layout.anchor,
+            layout.anchor + image_len,
+            device=hidden_states.device,
+        )
+        # A2 cannot lower a BF16 basic slice here, so use index_select rather
+        # than ``hidden_states[:, -image_len:]``.
+        image_hidden = torch.index_select(hidden_states, 1, image_indices).to(self.extra_device)
         output_scale, output_shift = self.diff_adaln_out(time_embedding).chunk(2, dim=-1)
         image_hidden = _adaln_apply(
             image_hidden,
@@ -441,11 +493,7 @@ class NativeGlmImageGenerator:
         max_memory_gib: int = 50,
         vae_device: str = "npu:0",
     ) -> None:
-        # vLLM-Ascend enables JIT compilation globally in worker processes.
-        # On A2/CANN 9.2 that path parses an A3-only hifloat4 op descriptor and
-        # poisons the op registry before the Flux2 VAE's Conv2D is selected.
-        if hasattr(torch, "npu") and torch.npu.is_available():
-            torch.npu.set_compile_mode(jit_compile=False)
+        configure_a2_diffusion()
         self.model = NativeGlmImageMoeDiffusion(
             checkpoint,
             stage_config=stage_config,
@@ -486,48 +534,7 @@ class NativeGlmImageGenerator:
         raw = torch.linspace(1.0, 0.0, steps + 1)
         return alpha * raw / (1 + (alpha - 1) * raw)
 
-    @torch.no_grad()
-    def generate(
-        self,
-        prompt: str,
-        *,
-        height: int = 512,
-        width: int = 512,
-        num_steps: int = 4,
-        seed: int = 1234,
-        generated_ids: list[int] | None = None,
-    ) -> torch.Tensor:
-        layout = build_diffusion_layout(
-            self.tokenizer,
-            prompt,
-            height,
-            width,
-            generated_ids or (),
-        )
-        image_len = layout.grid_h * layout.grid_w
-        generator = torch.Generator(device=self.model.extra_device).manual_seed(seed)
-        latents = torch.randn(
-            (image_len, self.model.anchor_patch_dim),
-            generator=generator,
-            device=self.model.extra_device,
-            dtype=torch.bfloat16,
-        )
-        timesteps = self._timesteps(image_len, num_steps)
-        for step in range(num_steps):
-            current = timesteps[step].to(self.model.extra_device)
-            next_step = timesteps[step + 1].to(self.model.extra_device)
-            velocity = self.model.predict_velocity(layout, latents, current.view(1))
-            # GLM-Image's DMD2 student uses the renoise sampler:
-            # x0 = x_t - t*v, then x_t-1 = (1-t_next)*x0 + t_next*eps.
-            x0 = latents.float() - current.float() * velocity.float()
-            noise = torch.randn(
-                x0.shape,
-                generator=generator,
-                device=self.model.extra_device,
-                dtype=torch.float32,
-            )
-            latents = ((1.0 - next_step.float()) * x0 + next_step.float() * noise).to(latents.dtype)
-
+    def _decode_latents(self, latents: torch.Tensor, layout: GlmImageTokenLayout) -> torch.Tensor:
         packed = latents.view(
             1,
             layout.grid_h,
@@ -572,6 +579,55 @@ class NativeGlmImageGenerator:
             latents.dtype,
             latents.device,
         )
-        with _standard_conv_internal_format():
+        with standard_conv_internal_format():
             decoded = self.vae.decode(latents, return_dict=False)[0]
+        if not bool(torch.isfinite(decoded).all()):
+            raise RuntimeError("Flux2 VAE produced non-finite image pixels")
         return decoded.clamp(-1.0, 1.0)
+
+    @torch.no_grad()
+    def generate(
+        self,
+        prompt: str,
+        *,
+        height: int = 512,
+        width: int = 512,
+        num_steps: int = 4,
+        seed: int = 1234,
+        generated_ids: list[int] | None = None,
+    ) -> torch.Tensor:
+        layout = build_diffusion_layout(
+            self.tokenizer,
+            prompt,
+            height,
+            width,
+            generated_ids or (),
+        )
+        image_len = layout.grid_h * layout.grid_w
+        generator = torch.Generator(device=self.model.extra_device).manual_seed(seed)
+        latents = torch.randn(
+            (image_len, self.model.anchor_patch_dim),
+            generator=generator,
+            device=self.model.extra_device,
+            dtype=torch.bfloat16,
+        )
+        timesteps = self._timesteps(image_len, num_steps)
+        for step in range(num_steps):
+            current = timesteps[step].to(self.model.extra_device)
+            next_step = timesteps[step + 1].to(self.model.extra_device)
+            velocity = self.model.predict_velocity(
+                layout,
+                latents,
+                current.view(1),
+            )
+            # GLM-Image's DMD2 student uses the renoise sampler:
+            # x0 = x_t - t*v, then x_t-1 = (1-t_next)*x0 + t_next*eps.
+            x0 = latents.float() - current.float() * velocity.float()
+            noise = torch.randn(
+                x0.shape,
+                generator=generator,
+                device=self.model.extra_device,
+                dtype=torch.float32,
+            )
+            latents = ((1.0 - next_step.float()) * x0 + next_step.float() * noise).to(latents.dtype)
+        return self._decode_latents(latents.unsqueeze(0), layout)

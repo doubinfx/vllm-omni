@@ -1,0 +1,175 @@
+# SPDX-License-Identifier: Apache-2.0
+"""A2 fused kernel adapters for GLM-Image native diffusion."""
+
+from __future__ import annotations
+
+import os
+
+import torch
+from torch import nn
+
+from vllm_omni.model_executor.models.glm_image_moe_transfusion.ascend_compat import (
+    is_ascend_a2,
+)
+
+A2_FUSED_OPS_ENV = "GLM_IMAGE_MOE_A2_FUSED_OPS"
+
+
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _get_npu():
+    import torch_npu
+
+    return torch_npu
+
+
+def use_a2_fused_attention() -> bool:
+    if not _env_enabled(A2_FUSED_OPS_ENV) or not is_ascend_a2():
+        return False
+    npu = _get_npu()
+    return all(
+        hasattr(npu, op)
+        for op in (
+            "npu_fusion_attention",
+            "npu_rotary_mul",
+        )
+    )
+
+
+def use_a2_fused_moe() -> bool:
+    if not _env_enabled(A2_FUSED_OPS_ENV) or not is_ascend_a2():
+        return False
+    npu = _get_npu()
+    return all(
+        hasattr(npu, op)
+        for op in (
+            "npu_grouped_matmul",
+            "npu_moe_token_permute",
+            "npu_moe_token_unpermute",
+            "npu_swiglu",
+        )
+    )
+
+
+def _apply_rotary(
+    hidden_states: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    interleaved: bool,
+) -> torch.Tensor:
+    npu = _get_npu()
+    output_dtype = hidden_states.dtype
+    cos = cos.to(hidden_states.device)
+    sin = sin.to(hidden_states.device)
+    if interleaved:
+        half = cos.shape[-1] // 2
+        cos = cos[..., :half].repeat_interleave(2, dim=-1)
+        sin = sin[..., :half].repeat_interleave(2, dim=-1)
+    return npu.npu_rotary_mul(
+        hidden_states.float(),
+        cos.float().unsqueeze(2),
+        sin.float().unsqueeze(2),
+        rotary_mode="interleave" if interleaved else "half",
+    ).to(output_dtype)
+
+
+def a2_attention_forward(
+    attention: nn.Module,
+    hidden_states: torch.Tensor,
+    attention_mask: torch.Tensor,
+    position_embeddings: tuple[torch.Tensor, torch.Tensor],
+) -> tuple[torch.Tensor, None]:
+    """Run the GLM MLA attention math with A2 fused RoPE and FlashAttention."""
+    batch_size, seq_length = hidden_states.shape[:-1]
+    q_states = attention.q_b_proj(attention.q_a_layernorm(attention.q_a_proj(hidden_states)))
+    q_states = q_states.view(batch_size, seq_length, attention.num_heads, attention.qk_head_dim)
+    q_pass, q_rot = torch.split(q_states, [attention.qk_nope_head_dim, attention.qk_rope_head_dim], dim=-1)
+
+    compressed_kv = attention.kv_a_proj_with_mqa(hidden_states)
+    kv_nope, k_rot = torch.split(compressed_kv, [attention.kv_lora_rank, attention.qk_rope_head_dim], dim=-1)
+    kv_nope = attention.kv_a_layernorm(kv_nope)
+    expanded_kv = attention.kv_b_proj(kv_nope).view(
+        batch_size,
+        seq_length,
+        attention.num_heads,
+        attention.qk_nope_head_dim + attention.v_head_dim,
+    )
+    k_pass, value_states = torch.split(
+        expanded_kv,
+        [attention.qk_nope_head_dim, attention.v_head_dim],
+        dim=-1,
+    )
+    k_rot = k_rot.view(batch_size, seq_length, 1, attention.qk_rope_head_dim)
+
+    cos, sin = position_embeddings
+    q_rot = _apply_rotary(q_rot, cos, sin, interleaved=attention.config.rope_interleave)
+    k_rot = _apply_rotary(k_rot, cos, sin, interleaved=attention.config.rope_interleave)
+    k_rot = k_rot.expand(-1, -1, attention.num_heads, -1)
+
+    query_states = torch.cat((q_pass, q_rot), dim=-1).contiguous()
+    key_states = torch.cat((k_pass, k_rot), dim=-1).contiguous()
+    attention_output = _get_npu().npu_fusion_attention(
+        query_states,
+        key_states,
+        value_states.contiguous(),
+        head_num=attention.num_heads,
+        input_layout="BSND",
+        atten_mask=attention_mask.to(query_states.device),
+        scale=float(attention.scaling),
+        keep_prob=1.0,
+        sparse_mode=0,
+    )[0]
+    attention_output = attention_output.reshape(batch_size, seq_length, -1).contiguous()
+    return attention.o_proj(attention_output), None
+
+
+def a2_moe_forward(mlp: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Route sparse experts through Ascend grouped GEMM and token permutation."""
+    npu = _get_npu()
+    residuals = hidden_states
+    original_shape = hidden_states.shape
+    _, top_k_weights, top_k_indices = mlp.gate(hidden_states)
+    flattened = hidden_states.reshape(-1, hidden_states.shape[-1])
+    experts = mlp.experts
+
+    permuted, row_ids = npu.npu_moe_token_permute(flattened, top_k_indices.to(torch.int32))
+    tokens_per_expert = torch.histc(
+        top_k_indices,
+        bins=experts.num_experts,
+        min=0,
+        max=experts.num_experts,
+    )
+    gate_up = npu.npu_grouped_matmul(
+        [permuted],
+        [experts.gate_up_proj.transpose(1, 2)],
+        bias=None,
+        group_list=tokens_per_expert,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+    )[0]
+    activated = npu.npu_swiglu(gate_up, dim=-1)
+    expert_output = npu.npu_grouped_matmul(
+        [activated],
+        [experts.down_proj.transpose(1, 2)],
+        bias=None,
+        group_list=tokens_per_expert,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+    )[0]
+    routed = npu.npu_moe_token_unpermute(expert_output, row_ids, probs=top_k_weights)
+    routed = routed.view(original_shape)
+    return routed + mlp.shared_experts(residuals)
+
+
+__all__ = [
+    "A2_FUSED_OPS_ENV",
+    "a2_attention_forward",
+    "a2_moe_forward",
+    "use_a2_fused_attention",
+    "use_a2_fused_moe",
+]

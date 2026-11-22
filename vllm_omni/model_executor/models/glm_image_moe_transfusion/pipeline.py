@@ -22,9 +22,7 @@ def _diffusion_stage(stage_id: int, input_sources: tuple[int, ...]) -> StagePipe
         final_output=True,
         final_output_type="image",
         model_arch=_DIFFUSION_ARCH,
-        custom_process_input_func=(
-            f"{_PROCESSOR}.ar2diffusion" if input_sources else None
-        ),
+        custom_process_input_func=(f"{_PROCESSOR}.ar2diffusion" if input_sources else None),
     )
 
 

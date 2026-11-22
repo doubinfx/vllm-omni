@@ -15,6 +15,7 @@ from vllm_omni.model_executor.models.glm_image_moe_transfusion.prompt import (
     build_diffusion_layout,
     build_direct_prefix_ids,
     trim_ar_output_ids,
+    validate_glm_image_moe_tokenizer,
 )
 
 
@@ -129,3 +130,26 @@ def test_trim_ar_output_removes_conversation_terminator() -> None:
 def test_resolution_alignment(height: int, width: int) -> None:
     with pytest.raises(ValueError):
         build_ar_prefix_ids(RecordingTokenizer(), "prompt", height, width)
+
+
+def test_tokenizer_special_ids_must_match_layout() -> None:
+    expected = {
+        SOP_TOKEN_ID: "<sop>",
+        EOP_TOKEN_ID: "<eop>",
+        USER_TOKEN_ID: "<|user|>",
+        ASSISTANT_TOKEN_ID: "<|assistant|>",
+        BOI_TOKEN_ID: "<|begin_of_image|>",
+    }
+
+    class Tokenizer:
+        def convert_ids_to_tokens(self, token_id: int):
+            return expected.get(token_id)
+
+    validate_glm_image_moe_tokenizer(Tokenizer())
+
+    class DriftedTokenizer(Tokenizer):
+        def convert_ids_to_tokens(self, token_id: int):
+            return "wrong-token"
+
+    with pytest.raises(ValueError, match="special-token mismatch"):
+        validate_glm_image_moe_tokenizer(DriftedTokenizer())

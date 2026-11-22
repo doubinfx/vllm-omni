@@ -24,6 +24,28 @@ THINKING_TEMPLATE = (
 )
 IMAGE_REQUEST_TEMPLATE = "Please generate an image according to the text below."
 
+_EXPECTED_TOKENS = {
+    SOP_TOKEN_ID: "<sop>",
+    EOP_TOKEN_ID: "<eop>",
+    USER_TOKEN_ID: "<|user|>",
+    ASSISTANT_TOKEN_ID: "<|assistant|>",
+    BOI_TOKEN_ID: "<|begin_of_image|>",
+}
+
+
+def validate_glm_image_moe_tokenizer(tokenizer: Any) -> None:
+    """Fail if the tokenizer no longer matches the native token layout."""
+    mismatches = {
+        token_id: (expected, tokenizer.convert_ids_to_tokens(token_id))
+        for token_id, expected in _EXPECTED_TOKENS.items()
+        if tokenizer.convert_ids_to_tokens(token_id) != expected
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{token_id}: expected {expected!r}, got {actual!r}" for token_id, (expected, actual) in mismatches.items()
+        )
+        raise ValueError(f"GLM-Image tokenizer special-token mismatch: {details}")
+
 
 @dataclass(frozen=True)
 class GlmImageTokenLayout:
