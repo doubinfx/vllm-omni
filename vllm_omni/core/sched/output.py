@@ -41,6 +41,11 @@ class OmniNewRequestData(NewRequestData):
     ) -> "OmniNewRequestData":
         """Preserve upstream request data while attaching Omni payloads."""
         base_data = {field.name: getattr(data, field.name) for field in fields(NewRequestData)}
+        if base_data["prefill_token_ids"] is None:
+            all_token_ids = getattr(request, "_all_token_ids", None) if request is not None else None
+            fallback_ids = all_token_ids if all_token_ids is not None else base_data["prompt_token_ids"]
+            if fallback_ids is not None:
+                base_data["prefill_token_ids"] = list(fallback_ids)
         return cls(
             **base_data,
             external_req_id=getattr(request, "external_req_id", None),
@@ -85,7 +90,7 @@ class OmniNewRequestData(NewRequestData):
         )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class OmniCachedRequestData(CachedRequestData):
     """Cached request data for omni models with embeddings support.
 
