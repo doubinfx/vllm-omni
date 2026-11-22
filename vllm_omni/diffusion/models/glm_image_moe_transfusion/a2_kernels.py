@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -12,11 +14,54 @@ from vllm_omni.model_executor.models.glm_image_moe_transfusion.ascend_compat imp
     is_ascend_a2,
 )
 
+logger = logging.getLogger(__name__)
+
 A2_FUSED_OPS_ENV = "GLM_IMAGE_MOE_A2_FUSED_OPS"
+A2_FA_VENDOR_ENV = "GLM_IMAGE_MOE_A2_FA_VENDOR"
+A2_FA_VENDOR_FILES = (
+    Path("op_api/lib/libcust_opapi.so"),
+    Path("op_impl/ai_core/tbe/config/ascend910b/aic-ascend910b-ops-info.json"),
+    Path("op_impl/ai_core/tbe/kernel/ascend910b/flash_attention_score"),
+    Path("op_impl/ai_core/tbe/kernel/ascend910b/flash_attention_score_grad"),
+)
 
 
 def _env_enabled(name: str) -> bool:
     return os.environ.get(name, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def registered_a2_fa_vendor() -> Path | None:
+    """Return a registered custom FA package that carries 910B kernels.
+
+    ``ASCEND_CUSTOM_OPP_PATH`` is process-wide and may contain A3-only packages
+    from earlier workloads. An explicitly configured GLM-Image vendor is
+    validated strictly so an accidental A3 fallback fails during model startup.
+    """
+    configured = os.environ.get(A2_FA_VENDOR_ENV, "").strip()
+    candidates = [
+        Path(value)
+        for value in os.environ.get("ASCEND_CUSTOM_OPP_PATH", "").split(os.pathsep)
+        if value
+    ]
+    if configured:
+        candidates.insert(0, Path(configured))
+
+    for candidate in candidates:
+        vendor = candidate.expanduser().resolve()
+        if all((vendor / relative).exists() for relative in A2_FA_VENDOR_FILES):
+            return vendor
+
+    if configured:
+        missing = [
+            str(relative)
+            for relative in A2_FA_VENDOR_FILES
+            if not (Path(configured) / relative).exists()
+        ]
+        raise RuntimeError(
+            f"A2 FlashAttention vendor {configured!r} is missing required "
+            f"ascend910b artifacts: {', '.join(missing)}"
+        )
+    return None
 
 
 def _get_npu():
@@ -29,13 +74,17 @@ def use_a2_fused_attention() -> bool:
     if not _env_enabled(A2_FUSED_OPS_ENV) or not is_ascend_a2():
         return False
     npu = _get_npu()
-    return all(
+    available = all(
         hasattr(npu, op)
         for op in (
             "npu_fusion_attention",
             "npu_rotary_mul",
         )
     )
+    vendor = registered_a2_fa_vendor()
+    if available and vendor is not None:
+        logger.info("Using A2 custom FlashAttentionScore vendor: %s", vendor)
+    return available
 
 
 def use_a2_fused_moe() -> bool:
@@ -168,8 +217,10 @@ def a2_moe_forward(mlp: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
 
 __all__ = [
     "A2_FUSED_OPS_ENV",
+    "A2_FA_VENDOR_ENV",
     "a2_attention_forward",
     "a2_moe_forward",
+    "registered_a2_fa_vendor",
     "use_a2_fused_attention",
     "use_a2_fused_moe",
 ]

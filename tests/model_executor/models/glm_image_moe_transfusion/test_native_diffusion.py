@@ -100,6 +100,32 @@ def test_a2_fused_kernels_are_disabled_by_environment(monkeypatch):
 
 
 @pytest.mark.cpu
+def test_a2_fa_vendor_requires_an_ascend910b_forward_kernel(monkeypatch, tmp_path):
+    vendor = tmp_path / "custom_transformer"
+    for relative in a2_kernels.A2_FA_VENDOR_FILES:
+        path = vendor / relative
+        if path.suffix:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv(a2_kernels.A2_FA_VENDOR_ENV, str(vendor))
+
+    assert a2_kernels.registered_a2_fa_vendor() == vendor.resolve()
+
+
+@pytest.mark.cpu
+def test_explicit_a2_fa_vendor_rejects_an_a3_only_package(monkeypatch, tmp_path):
+    vendor = tmp_path / "custom_transformer"
+    (vendor / "op_api" / "lib").mkdir(parents=True)
+    (vendor / "op_api" / "lib" / "libcust_opapi.so").touch()
+    monkeypatch.setenv(a2_kernels.A2_FA_VENDOR_ENV, str(vendor))
+
+    with pytest.raises(RuntimeError, match="ascend910b"):
+        a2_kernels.registered_a2_fa_vendor()
+
+
+@pytest.mark.cpu
 def test_module_adapters_are_scoped_to_enabled_kernels():
     model = object.__new__(native_diffusion.NativeGlmImageMoeDiffusion)
     model.fused_attention = True

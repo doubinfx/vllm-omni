@@ -29,3 +29,19 @@ python benchmarks/diffusion/glm_image_moe_transfusion/compare_images.py \
 The comparison reports exact equality, mean/max absolute error, PSNR, SSIM and
 basic color statistics that catch blank or constant images. Keep generated
 images and full result JSON outside the source repository.
+
+## A2 FlashAttentionScore vendor
+
+On Ascend 910B, the diffusion attention adapter calls
+`torch_npu.npu_fusion_attention`. If a matching custom operator package is
+registered, its ACLNN `FlashAttentionScore` implementation replaces the stock
+kernel. Set `GLM_IMAGE_MOE_A2_FA_VENDOR` to that package root so startup fails
+when the expected 910B forward kernel is missing instead of silently selecting
+another backend:
+
+```bash
+export GLM_IMAGE_MOE_A2_FA_VENDOR=/path/to/vendors/custom_transformer
+source "${GLM_IMAGE_MOE_A2_FA_VENDOR}/bin/set_env.bash"
+```
+
+The custom operator path must be configured before `torch_npu` is imported.
