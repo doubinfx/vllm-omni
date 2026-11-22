@@ -1,8 +1,9 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
-from vllm_omni.diffusion.models.glm_image_moe_transfusion import native_diffusion
+from vllm_omni.diffusion.models.glm_image_moe_transfusion import a2_kernels, native_diffusion
 from vllm_omni.model_executor.models.glm_image_moe_transfusion import ascend_compat
 
 
@@ -26,9 +27,7 @@ def test_standard_conv_internal_format_restores_previous_value(monkeypatch):
         ascend_compat,
         "_get_torch_npu",
         lambda: SimpleNamespace(
-            _C=SimpleNamespace(
-                _npu_getOption=lambda name: b"enable" if name == "ALLOW_INTERNAL_FORMAT" else b""
-            )
+            _C=SimpleNamespace(_npu_getOption=lambda name: b"enable" if name == "ALLOW_INTERNAL_FORMAT" else b"")
         ),
     )
     monkeypatch.setattr(ascend_compat, "is_ascend_a2", lambda: True)
@@ -89,3 +88,48 @@ def test_select_mrope_returns_single_request_tables():
 
     assert cos.shape == (1, 7, 12)
     assert sin.shape == (1, 7, 12)
+
+
+@pytest.mark.cpu
+def test_a2_fused_kernels_are_disabled_by_environment(monkeypatch):
+    monkeypatch.setenv(a2_kernels.A2_FUSED_OPS_ENV, "0")
+    monkeypatch.setattr(a2_kernels, "is_ascend_a2", lambda: True)
+
+    assert not a2_kernels.use_a2_fused_attention()
+    assert not a2_kernels.use_a2_fused_moe()
+
+
+@pytest.mark.cpu
+def test_module_adapters_are_scoped_to_enabled_kernels():
+    model = object.__new__(native_diffusion.NativeGlmImageMoeDiffusion)
+    model.fused_attention = True
+    model.fused_moe = False
+    attention = torch.nn.Linear(4, 4)
+    mlp = torch.nn.Linear(4, 4)
+    layer = SimpleNamespace(self_attn=attention, mlp=mlp)
+    model.backbone = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
+
+    original_attention_forward = attention.forward.__func__
+    original_mlp_forward = mlp.forward.__func__
+    model._install_module_adapters()
+
+    assert attention.forward.__func__ is not original_attention_forward
+    assert mlp.forward.__func__ is original_mlp_forward
+
+
+@pytest.mark.cpu
+def test_module_adapters_leave_both_paths_untouched_when_disabled():
+    model = object.__new__(native_diffusion.NativeGlmImageMoeDiffusion)
+    model.fused_attention = False
+    model.fused_moe = False
+    attention = torch.nn.Linear(4, 4)
+    mlp = torch.nn.Linear(4, 4)
+    layer = SimpleNamespace(self_attn=attention, mlp=mlp)
+    model.backbone = SimpleNamespace(model=SimpleNamespace(layers=[layer]))
+
+    original_attention_forward = attention.forward.__func__
+    original_mlp_forward = mlp.forward.__func__
+    model._install_module_adapters()
+
+    assert attention.forward.__func__ is original_attention_forward
+    assert mlp.forward.__func__ is original_mlp_forward

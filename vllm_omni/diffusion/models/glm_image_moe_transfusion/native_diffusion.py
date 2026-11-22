@@ -11,7 +11,9 @@ import json
 import logging
 import math
 import re
+from functools import wraps
 from pathlib import Path
+from types import MethodType
 
 import torch
 import torch.nn as nn
@@ -25,6 +27,12 @@ from transformers import (
     Glm4MoeLiteForCausalLM,
 )
 
+from vllm_omni.diffusion.models.glm_image_moe_transfusion.a2_kernels import (
+    a2_attention_forward,
+    a2_moe_forward,
+    use_a2_fused_attention,
+    use_a2_fused_moe,
+)
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.ascend_compat import (
     configure_a2_diffusion,
     standard_conv_internal_format,
@@ -277,6 +285,61 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         )
         self.rope_sections = list(rope_parameters["mrope_section"])
         self.rope_layout = "qwen3"
+        self.fused_attention = use_a2_fused_attention()
+        self.fused_moe = use_a2_fused_moe()
+        self._npu_attention_mask: torch.Tensor | None = None
+        if self.fused_attention or self.fused_moe:
+            self._install_module_adapters()
+        logger.info(
+            "Native GLM-Image A2 kernels: attention=%s moe=%s",
+            self.fused_attention,
+            self.fused_moe,
+        )
+
+    def _install_module_adapters(self) -> None:
+        for layer in self.backbone.model.layers:
+            if self.fused_attention:
+                self._wrap_attention(layer.self_attn)
+            if self.fused_moe:
+                self._wrap_mlp(layer.mlp)
+
+    def _wrap_attention(self, attention: nn.Module) -> None:
+        original_forward = attention.forward
+
+        @wraps(original_forward)
+        def attention_forward(
+            module: nn.Module,
+            hidden_states: torch.Tensor,
+            position_embeddings: tuple[torch.Tensor, torch.Tensor],
+            attention_mask: torch.Tensor | None = None,
+            past_key_values: object | None = None,
+            use_cache: bool | None = False,
+            **kwargs: object,
+        ):
+            del attention_mask, use_cache, kwargs
+            if self._npu_attention_mask is None:
+                raise RuntimeError("A2 fused attention requires a packed attention mask")
+            if past_key_values is not None:
+                raise RuntimeError("A2 fused attention does not support KV cache")
+            return a2_attention_forward(
+                module,
+                hidden_states,
+                self._npu_attention_mask,
+                position_embeddings,
+            )
+
+        attention.forward = MethodType(attention_forward, attention)
+
+    def _wrap_mlp(self, mlp: nn.Module) -> None:
+        original_forward = mlp.forward
+
+        @wraps(original_forward)
+        def mlp_forward(module: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+            if hasattr(module, "experts"):
+                return a2_moe_forward(module, hidden_states)
+            return original_forward(hidden_states)
+
+        mlp.forward = MethodType(mlp_forward, mlp)
 
     def _load_extra_weights(self) -> None:
         index = json.loads((self.checkpoint / "model.safetensors.index.json").read_text())
@@ -389,6 +452,7 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         cos = cos.to(hidden_states.dtype)
         sin = sin.to(hidden_states.dtype)
         attention_mask = _packed_attention_mask(layout.anchor, image_len, self.extra_device)
+        self._npu_attention_mask = attention_mask[0, 0] < 0 if self.fused_attention else None
 
         for layer in self.backbone.model.layers:
             hidden_states = layer(
@@ -517,6 +581,8 @@ class NativeGlmImageGenerator:
         )
         with standard_conv_internal_format():
             decoded = self.vae.decode(latents, return_dict=False)[0]
+        if not bool(torch.isfinite(decoded).all()):
+            raise RuntimeError("Flux2 VAE produced non-finite image pixels")
         return decoded.clamp(-1.0, 1.0)
 
     @torch.no_grad()
@@ -549,7 +615,11 @@ class NativeGlmImageGenerator:
         for step in range(num_steps):
             current = timesteps[step].to(self.model.extra_device)
             next_step = timesteps[step + 1].to(self.model.extra_device)
-            velocity = self.model.predict_velocity(layout, latents, current.view(1))
+            velocity = self.model.predict_velocity(
+                layout,
+                latents,
+                current.view(1),
+            )
             # GLM-Image's DMD2 student uses the renoise sampler:
             # x0 = x_t - t*v, then x_t-1 = (1-t_next)*x0 + t_next*eps.
             x0 = latents.float() - current.float() * velocity.float()
