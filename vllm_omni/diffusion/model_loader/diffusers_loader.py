@@ -756,6 +756,12 @@ class DiffusersPipelineLoader(HWRLoaderMixin):
                 fallback_ctx = load_unquantizable_fallback_on_cpu() if offload_after_quant else contextlib.nullcontext()
                 with fallback_ctx:
                     model = self._init_from_load_format(load_format, target_device, custom_pipeline_name, is_hsdp=False)
+                if getattr(model, "loads_own_weights", False):
+                    logger.info(
+                        "%s loads its checkpoint during construction; skipping generic weight materialization.",
+                        type(model).__name__,
+                    )
+                    return model.eval()
 
                 resolved_offload = resolve_offload(self.od_config)
                 distributed_offload = resolved_offload.strategy is OffloadStrategy.DISTRIBUTED_LAYER_WISE
