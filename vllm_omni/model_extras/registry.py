@@ -32,6 +32,12 @@ from vllm_omni.model_extras.cosmos3_nano_sim_bimanual import (
     COSMOS3_NANO_SIM_BIMANUAL_EXTRA_BODY_PARAMS,
     COSMOS3_NANO_SIM_BIMANUAL_EXTRA_OUTPUT_PARAMS,
 )
+from vllm_omni.model_extras.glm_image_moe_transfusion import (
+    build_text_to_image_tokenization as build_glm_image_moe_text_to_image_tokenization,
+)
+from vllm_omni.model_extras.glm_image_moe_transfusion import (
+    validate_glm_image_moe_tokenizer,
+)
 from vllm_omni.model_extras.helios import (
     HELIOS_EXTRA_BODY_PARAMS,
     HELIOS_EXTRA_OUTPUT_PARAMS,
@@ -127,6 +133,10 @@ from vllm_omni.model_extras.video_generation import VideoGenerationDefaults
 TextToImagePromptBuilder = Callable[
     [str, str | None, int | None, int | None],
     dict[str, Any],
+]
+TextToImageTokenizationBuilder = Callable[
+    [str, Any, int | None, int | None],
+    dict[str, list[int]],
 ]
 ImageToImagePromptBuilder = Callable[
     [str, str | None, "Image.Image | list[Image.Image]", int | None, int | None],
@@ -368,6 +378,14 @@ _EXTRA_SPECS: dict[str, dict[str, Any]] = {
         "init_extra_args_for_non_diffusion_stages": MAMMOTHMODA2_PREVIEW_INIT_EXTRA_ARGS_FOR_NON_DIFFUSION_STAGES,
         "text_to_image_prompt_builder": build_mammothmoda2_text_to_image_prompt,
     },
+    "GlmImageMoeTransfusionForCausalLM": {
+        "text_to_image_tokenization_builder": (build_glm_image_moe_text_to_image_tokenization),
+        "ar_tokenizer_validator": validate_glm_image_moe_tokenizer,
+    },
+    "GlmImageMoeTransfusionPipeline": {
+        "text_to_image_tokenization_builder": (build_glm_image_moe_text_to_image_tokenization),
+        "ar_tokenizer_validator": validate_glm_image_moe_tokenizer,
+    },
     "MingImagePipeline": {
         "extra_body_params": MING_FLASH_OMNI_EXTRA_BODY_PARAMS,
         "extra_output_params": MING_FLASH_OMNI_EXTRA_OUTPUT_PARAMS,
@@ -571,6 +589,21 @@ def build_text_to_image_prompt(
         height,
         width,
     )
+
+
+def build_text_to_image_tokenization(
+    model_class_name: str | None,
+    prompt: str,
+    tokenizer: Any,
+    height: int | None = None,
+    width: int | None = None,
+) -> dict[str, list[int]]:
+    """Tokenize a model-specific T2I prompt when the model declares a builder."""
+    spec = _get_spec(model_class_name)
+    builder: TextToImageTokenizationBuilder | None = spec.get("text_to_image_tokenization_builder") if spec else None
+    if builder is None:
+        return {}
+    return builder(prompt, tokenizer, height, width)
 
 
 def build_image_to_image_prompt(

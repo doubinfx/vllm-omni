@@ -326,6 +326,11 @@ _OMNI_MODELS = {
         "hunyuan_image3",
         "HunyuanImage3ForConditionalGeneration",
     ),
+    "GlmImageMoeTransfusionForCausalLM": (
+        "glm_image_moe_transfusion",
+        "ar_model",
+        "GlmImageMoeTransfusionForCausalLM",
+    ),
     ## fish_omni (Fish Audio Drama 3)
     "FishOmniForConditionalGeneration": (
         "fish_omni",

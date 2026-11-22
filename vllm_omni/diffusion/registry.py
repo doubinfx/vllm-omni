@@ -69,6 +69,11 @@ _DIFFUSION_MODELS = {
         "pipeline_glm_image",
         "GlmImagePipeline",
     ),
+    "GlmImageMoeTransfusionPipeline": (
+        "glm_image_moe_transfusion",
+        "pipeline",
+        "GlmImageMoeTransfusionPipeline",
+    ),
     "ZImagePipeline": (
         "z_image",
         "pipeline_z_image",
@@ -793,6 +798,7 @@ _DIFFUSION_POST_PROCESS_FUNCS = {
     "QwenImageEditPlusPipeline": "get_qwen_image_edit_plus_post_process_func",
     "QwenImage21Pipeline": "get_qwen_image_21_post_process_func",
     "GlmImagePipeline": "get_glm_image_post_process_func",
+    "GlmImageMoeTransfusionPipeline": ("get_glm_image_moe_transfusion_post_process_func"),
     "ZImagePipeline": "get_post_process_func",
     "OvisImagePipeline": "get_ovis_image_post_process_func",
     "MammothModa2DiTPipeline": "get_mammoth_moda2_post_process_func",
