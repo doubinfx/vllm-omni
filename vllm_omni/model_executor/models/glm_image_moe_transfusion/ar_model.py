@@ -20,6 +20,7 @@ from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
 )
+from vllm.sequence import IntermediateTensors
 
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.ascend_compat import (
     configure_a2_ar_model,
@@ -108,6 +109,35 @@ class GlmImageMoeTransfusionForCausalLM(
     """GLM4-MoE-lite causal LM over the shared GLM-Image checkpoint."""
 
     supports_mrope = True
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        model_intermediate_buffer: list[dict[str, object]] | None = None,
+        runtime_additional_information: list[dict[str, object]] | None = None,
+        seq_token_counts: list[int] | None = None,
+        sampling_metadata: Any = None,
+        logits_index: Any = None,
+        sampler: Any = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        """Ignore Omni's request buffer, which this text-only AR stage does not use."""
+        del (
+            model_intermediate_buffer,
+            runtime_additional_information,
+            seq_token_counts,
+            sampling_metadata,
+            logits_index,
+            sampler,
+        )
+        return super().forward(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+        )
 
     def embed_multimodal(self, **kwargs):
         """Accept the multimodal interface while carrying no media tensors."""

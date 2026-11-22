@@ -1,6 +1,11 @@
+import inspect
+
 import pytest
 
 from vllm_omni.config.stage_config import StageExecutionType
+from vllm_omni.model_executor.models.glm_image_moe_transfusion.ar_model import (
+    GlmImageMoeTransfusionForCausalLM,
+)
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.checkpoint import (
     resolve_ar_model_root,
 )
@@ -34,6 +39,17 @@ def test_ar_model_root_resolves_sibling_view(tmp_path) -> None:
     (ar_view / "config.json").write_text("{}")
 
     assert resolve_ar_model_root(str(diffusion), None, None) == str(ar_view)
+
+
+def test_ar_forward_accepts_omni_model_intermediate_buffer() -> None:
+    parameters = inspect.signature(GlmImageMoeTransfusionForCausalLM.forward).parameters
+
+    assert "model_intermediate_buffer" in parameters
+    assert "runtime_additional_information" in parameters
+    assert "seq_token_counts" in parameters
+    assert "sampling_metadata" in parameters
+    assert "logits_index" in parameters
+    assert "sampler" in parameters
 
 
 def test_text_to_image_tokenization_uses_native_ar_prefix() -> None:
