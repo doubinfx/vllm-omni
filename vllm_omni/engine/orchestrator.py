@@ -2819,6 +2819,11 @@ class OrchestratorBase:
     ) -> Any:
         """Process a bypassing request's raw prompt with the input processor that also prepares the
         prompts forwarded to this stage, so the stage keeps a single multimodal cache sender."""
+        if self.stage_pools[stage_id].stage_type == "diffusion":
+            # Diffusion clients build their request from the raw prompt and
+            # stage sampling params. There is no upstream LLM renderer to apply
+            # when a request enters directly at the diffusion stage.
+            return prompt
         if replica_id is not None:
             prompt = await asyncio.to_thread(self._scope_stage_mm_cache_to_replica, stage_id, prompt, replica_id)
         request = await self._process_stage_inputs(

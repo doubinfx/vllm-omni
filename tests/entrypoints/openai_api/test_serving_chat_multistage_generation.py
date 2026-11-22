@@ -96,6 +96,28 @@ def test_build_multistage_generation_inputs_applies_stage_specific_overrides(ser
     assert engine.default_sampling_params_list[2].lora_request is None
 
 
+def test_resolve_diffusion_entry_stage_uses_model_resolver(serving_chat, monkeypatch):
+    """Model extras can select the image request's entry stage."""
+    import vllm_omni.entrypoints.openai.serving_chat as serving_chat_module
+
+    resolver_calls = []
+
+    def resolver(request_args, num_stages, default_stage_id):
+        resolver_calls.append((request_args, num_stages, default_stage_id))
+        return 1
+
+    monkeypatch.setattr(serving_chat_module, "get_image_entry_stage_resolver", lambda _model: resolver)
+    monkeypatch.setattr(serving_chat, "_resolve_multistage_model_class_name", lambda _engine: "FakePipeline")
+    engine = SimpleNamespace(
+        stage_configs=[SimpleNamespace(stage_type="llm"), SimpleNamespace(stage_type="diffusion")],
+        resolve_entry_stage_id=lambda _modalities: 0,
+    )
+    request_args = {"think": False}
+
+    assert serving_chat._resolve_diffusion_entry_stage_id(engine, engine.stage_configs, request_args) == 1
+    assert resolver_calls == [(request_args, 2, 0)]
+
+
 @pytest.mark.parametrize("extra_body", [{}, {"bot_task": "think"}])
 def test_build_multistage_generation_inputs_leaves_mm_uuids_to_content_hash(serving_chat, extra_body):
     """Fixed image UUIDs collide across requests with the same processor kwargs.

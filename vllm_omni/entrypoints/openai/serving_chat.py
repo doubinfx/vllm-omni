@@ -57,6 +57,7 @@ from vllm_omni.model_extras import (
     get_ar_max_tokens_builder,
     get_extra_body_params,
     get_extra_output_params,
+    get_image_entry_stage_resolver,
     should_init_extra_args_for_non_diffusion_stages,
 )
 
@@ -557,6 +558,23 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         sp = sampling_params_list[ar_idx]
         if hasattr(sp, "max_tokens"):
             sp.max_tokens = builder(height, width, is_i2i=is_i2i)
+
+    def _resolve_diffusion_entry_stage_id(
+        self,
+        engine: AsyncOmni,
+        stage_configs: Sequence[Any],
+        extra_body: Mapping[str, object],
+    ) -> int:
+        """Resolve a model-declared image entry stage, defaulting to stage 0."""
+        default_stage_id = 0
+        resolve_default = getattr(engine, "resolve_entry_stage_id", None)
+        if resolve_default is not None:
+            default_stage_id = resolve_default(("text",))
+
+        resolver = get_image_entry_stage_resolver(self._resolve_multistage_model_class_name(engine))
+        if resolver is None:
+            return default_stage_id
+        return resolver(extra_body, len(stage_configs), default_stage_id)
 
     def _normalize_diffusion_request_args(
         self,
@@ -3714,6 +3732,14 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         if isinstance(engine, AsyncOmni):
             diffusion_engine = cast(AsyncOmni, engine)
             stage_configs = getattr(diffusion_engine, "stage_configs", None) or []
+            try:
+                entry_stage_id = self._resolve_diffusion_entry_stage_id(
+                    diffusion_engine,
+                    stage_configs,
+                    extra_body,
+                )
+            except ValueError as exc:
+                return self._create_error_response(str(exc), status_code=400)
             if stream and len(stage_configs) <= 1:
                 return self._create_error_response(
                     "stream=true is only supported for multi-stage image editing pipelines.",
@@ -3749,6 +3775,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 sampling_params_list=sampling_params_list,
                 request_id=request_id,
                 arrival_time=arrival_time,
+                entry_stage_id=entry_stage_id,
             )
             if stream:
                 return self._stream_diffusion_image_chunks(

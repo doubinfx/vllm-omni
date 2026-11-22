@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.prompt import (
@@ -21,6 +22,37 @@ _EXPECTED_TOKENS = {
     SOP_TOKEN_ID: "<sop>",
     EOP_TOKEN_ID: "<eop>",
 }
+
+GLM_IMAGE_MOE_TRANSFUSION_EXTRA_BODY_PARAMS = frozenset({"think"})
+
+
+def resolve_image_entry_stage(
+    request_args: Mapping[str, object],
+    num_stages: int,
+    default_stage_id: int,
+) -> int:
+    """Route thinking requests through AR and direct requests to diffusion."""
+    sources: list[object] = []
+    for container in (
+        request_args,
+        request_args.get("extra_args"),
+        request_args.get("extra_params"),
+    ):
+        if isinstance(container, Mapping) and "think" in container:
+            sources.append(container["think"])
+    if len(sources) > 1:
+        raise ValueError("think was provided more than once")
+    if not sources or sources[0] is None:
+        return default_stage_id
+
+    think = sources[0]
+    if not isinstance(think, bool):
+        raise ValueError("think must be a boolean")
+    if think:
+        if num_stages < 2:
+            raise ValueError("think=true requires a two-stage GLM-Image service")
+        return 0
+    return 1 if num_stages > 1 else 0
 
 
 def validate_glm_image_moe_tokenizer(tokenizer: Any) -> None:

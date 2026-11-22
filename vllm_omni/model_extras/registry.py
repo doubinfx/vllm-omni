@@ -33,10 +33,14 @@ from vllm_omni.model_extras.cosmos3_nano_sim_bimanual import (
     COSMOS3_NANO_SIM_BIMANUAL_EXTRA_OUTPUT_PARAMS,
 )
 from vllm_omni.model_extras.glm_image_moe_transfusion import (
+    GLM_IMAGE_MOE_TRANSFUSION_EXTRA_BODY_PARAMS,
+    validate_glm_image_moe_tokenizer,
+)
+from vllm_omni.model_extras.glm_image_moe_transfusion import (
     build_text_to_image_tokenization as build_glm_image_moe_text_to_image_tokenization,
 )
 from vllm_omni.model_extras.glm_image_moe_transfusion import (
-    validate_glm_image_moe_tokenizer,
+    resolve_image_entry_stage as resolve_glm_image_moe_entry_stage,
 )
 from vllm_omni.model_extras.helios import (
     HELIOS_EXTRA_BODY_PARAMS,
@@ -154,6 +158,7 @@ ImageToVideoPromptBuilder = Callable[
     dict[str, Any],
 ]
 XToTextPromptBuilder = Callable[[str, str, bool], tuple[dict[str, Any], list[int] | None]]
+ImageEntryStageResolver = Callable[[Mapping[str, object], int, int], int]
 OutputTensorRange = Literal["negative_one_to_one", "zero_to_one"]
 
 
@@ -379,12 +384,16 @@ _EXTRA_SPECS: dict[str, dict[str, Any]] = {
         "text_to_image_prompt_builder": build_mammothmoda2_text_to_image_prompt,
     },
     "GlmImageMoeTransfusionForCausalLM": {
+        "extra_body_params": GLM_IMAGE_MOE_TRANSFUSION_EXTRA_BODY_PARAMS,
         "text_to_image_tokenization_builder": (build_glm_image_moe_text_to_image_tokenization),
         "ar_tokenizer_validator": validate_glm_image_moe_tokenizer,
+        "image_entry_stage_resolver": resolve_glm_image_moe_entry_stage,
     },
     "GlmImageMoeTransfusionPipeline": {
+        "extra_body_params": GLM_IMAGE_MOE_TRANSFUSION_EXTRA_BODY_PARAMS,
         "text_to_image_tokenization_builder": (build_glm_image_moe_text_to_image_tokenization),
         "ar_tokenizer_validator": validate_glm_image_moe_tokenizer,
+        "image_entry_stage_resolver": resolve_glm_image_moe_entry_stage,
     },
     "MingImagePipeline": {
         "extra_body_params": MING_FLASH_OMNI_EXTRA_BODY_PARAMS,
@@ -470,6 +479,12 @@ def get_extra_body_params(model_class_name: str | None) -> frozenset[str]:
 def get_extra_output_params(model_class_name: str | None) -> frozenset[str]:
     spec = _get_spec(model_class_name)
     return spec.get("extra_output_params", frozenset()) if spec is not None else frozenset()
+
+
+def get_image_entry_stage_resolver(model_class_name: str | None) -> ImageEntryStageResolver | None:
+    """Return a model's request-level image entry-stage resolver, if declared."""
+    spec = _get_spec(model_class_name)
+    return spec.get("image_entry_stage_resolver") if spec is not None else None
 
 
 def get_video_generation_defaults(
