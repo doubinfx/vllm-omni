@@ -24,6 +24,12 @@ from vllm_omni.model_extras.cosmos3 import (
     COSMOS3_EXTRA_BODY_PARAMS,
     COSMOS3_EXTRA_OUTPUT_PARAMS,
 )
+from vllm_omni.model_executor.models.glm_image_moe_transfusion.prompt import (
+    validate_glm_image_moe_tokenizer,
+)
+from vllm_omni.model_extras.glm_image_moe_transfusion import (
+    resolve_entry_stage_id as resolve_glm_image_moe_entry_stage_id,
+)
 from vllm_omni.model_extras.helios import (
     HELIOS_EXTRA_BODY_PARAMS,
     HELIOS_EXTRA_OUTPUT_PARAMS,
@@ -116,6 +122,7 @@ TextToImagePromptBuilder = Callable[
     [str, str | None, int | None, int | None],
     dict[str, Any],
 ]
+EntryStageResolver = Callable[[int, Mapping[str, Any]], int]
 ImageToImagePromptBuilder = Callable[
     [str, str | None, "Image.Image | list[Image.Image]", int | None, int | None],
     dict[str, Any],
@@ -327,6 +334,14 @@ _EXTRA_SPECS: dict[str, dict[str, Any]] = {
         "init_extra_args_for_non_diffusion_stages": MAMMOTHMODA2_PREVIEW_INIT_EXTRA_ARGS_FOR_NON_DIFFUSION_STAGES,
         "text_to_image_prompt_builder": build_mammothmoda2_text_to_image_prompt,
     },
+    "GlmImageMoeTransfusionForCausalLM": {
+        "ar_tokenizer_validator": validate_glm_image_moe_tokenizer,
+        "entry_stage_resolver": resolve_glm_image_moe_entry_stage_id,
+    },
+    "GlmImageMoeTransfusionPipeline": {
+        "ar_tokenizer_validator": validate_glm_image_moe_tokenizer,
+        "entry_stage_resolver": resolve_glm_image_moe_entry_stage_id,
+    },
     "MingImagePipeline": {
         "extra_body_params": MING_FLASH_OMNI_EXTRA_BODY_PARAMS,
         "extra_output_params": MING_FLASH_OMNI_EXTRA_OUTPUT_PARAMS,
@@ -475,6 +490,12 @@ def get_ar_tokenizer_validator(model_class_name: str | None) -> Callable[[Any], 
     """
     spec = _get_spec(model_class_name)
     return spec.get("ar_tokenizer_validator") if spec is not None else None
+
+
+def get_entry_stage_resolver(model_class_name: str | None) -> EntryStageResolver | None:
+    """Return a model-declared resolver for request-dependent entry stages."""
+    spec = _get_spec(model_class_name)
+    return spec.get("entry_stage_resolver") if spec is not None else None
 
 
 def build_text_to_image_prompt(

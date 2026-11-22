@@ -714,6 +714,22 @@ def test_hunyuan_image3_ar_tokenizer_validator_registered() -> None:
 
 @pytest.mark.core_model
 @pytest.mark.cpu
+def test_glm_image_entry_stage_resolver_registered() -> None:
+    from vllm_omni.model_extras import get_entry_stage_resolver
+
+    resolver = get_entry_stage_resolver("GlmImageMoeTransfusionPipeline")
+    assert resolver is not None
+    assert get_entry_stage_resolver("GlmImageMoeTransfusionForCausalLM") is resolver
+    assert resolver(2, {"think": True}) == 0
+    assert resolver(2, {"think": False}) == 1
+    with pytest.raises(ValueError, match="thinking service"):
+        resolver(1, {"think": True})
+    assert get_entry_stage_resolver("WanVACEPipeline") is None
+    assert get_entry_stage_resolver(None) is None
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
 def test_hunyuan_image3_build_ar_stage_inputs_t2i_string_fallback() -> None:
     from vllm_omni.model_extras.hunyuan_image3 import build_ar_stage_inputs
 

@@ -52,6 +52,7 @@ from vllm_omni.metrics.modality import (
 from vllm_omni.model_executor.models.minicpmo_4_5.pipeline import MINICPMO45_REFERENCE_AUDIO_KEY
 from vllm_omni.model_extras import (
     build_text_to_image_prompt,
+    get_entry_stage_resolver,
     get_extra_body_params,
     get_extra_output_params,
     should_init_extra_args_for_non_diffusion_stages,
@@ -3580,6 +3581,13 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         if isinstance(engine, AsyncOmni):
             diffusion_engine = cast(AsyncOmni, engine)
             stage_configs = getattr(diffusion_engine, "stage_configs", None) or []
+            try:
+                resolver = get_entry_stage_resolver(
+                    self._resolve_multistage_model_class_name(diffusion_engine),
+                )
+                entry_stage_id = resolver(len(stage_configs), extra_body) if resolver is not None else 0
+            except ValueError as exc:
+                return self._create_error_response(str(exc), status_code=400)
             if stream and len(stage_configs) <= 1:
                 return self._create_error_response(
                     "stream=true is only supported for multi-stage image editing pipelines.",
@@ -3615,6 +3623,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 sampling_params_list=sampling_params_list,
                 request_id=request_id,
                 arrival_time=arrival_time,
+                entry_stage_id=entry_stage_id,
             )
             if stream:
                 return self._stream_diffusion_image_chunks(

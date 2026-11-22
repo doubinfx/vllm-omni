@@ -68,6 +68,13 @@ class ImageGenerationRequest(BaseModel):
         description="Task mode for the model (e.g., 'cot' enables chain-of-thought generation). "
         "Only supported by specific diffusion models.",
     )
+    think: bool | None = Field(
+        default=None,
+        description=(
+            "For models supporting direct and thinking topologies, false enters "
+            "the Diffusion stage directly and true enters the AR stage first."
+        ),
+    )
 
     # OpenAI standard fields
     model: str | None = Field(

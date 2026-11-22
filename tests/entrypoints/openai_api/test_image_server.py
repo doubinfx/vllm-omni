@@ -275,6 +275,7 @@ def async_omni_test_client():
             self.default_sampling_params_list = default_sampling_params_list
             self.captured_sampling_params_list = None
             self.captured_prompt = None
+            self.captured_generate_kwargs = None
             self._images = [Image.new("RGB", (64, 64), color="green")]
             self.od_config = SimpleNamespace(supports_multimodal_inputs=True)
 
@@ -284,6 +285,7 @@ def async_omni_test_client():
             else:
                 self.captured_sampling_params_list = [sampling_params]
             self.captured_prompt = prompt
+            self.captured_generate_kwargs = kwargs
             images = [img.copy() for img in self._images]
             yield MockGenerationResult(images)
 
@@ -734,6 +736,24 @@ def test_generate_images_async_omni_sampling_params(async_omni_test_client):
     assert captured[1].height == 256
     assert captured[1].width == 256
     assert captured[1].seed == 7
+
+
+def test_generate_images_glm_image_think_controls_entry_stage(async_omni_test_client):
+    """One thinking service accepts both modes without restarting."""
+    engine = async_omni_test_client.app.state.engine_client
+    engine.od_config.model_class_name = "GlmImageMoeTransfusionPipeline"
+
+    for think, expected_stage in ((True, 0), (False, 1)):
+        response = async_omni_test_client.post(
+            "/v1/images/generations",
+            json={
+                "prompt": "a cat",
+                "size": "256x256",
+                "think": think,
+            },
+        )
+        assert response.status_code == 200
+        assert engine.captured_generate_kwargs["entry_stage_id"] == expected_stage
 
 
 def test_generate_images_async_omni_stage_configs_only(async_omni_stage_configs_only_client):

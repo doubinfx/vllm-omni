@@ -1,0 +1,56 @@
+# GLM-Image thinking profile for Ascend A2: AR stage 0 -> diffusion stage 1.
+# Model topology is declared in glm_image_moe_transfusion.pipeline; this file
+# owns the four-card A2 placement, ports, and runtime tuning.
+pipeline: glm_image_moe_transfusion_think
+async_chunk: false
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.45
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    max_num_batched_tokens: 32768
+    devices: "0,1,2,3"
+    distributed_executor_backend: "mp"
+    tensor_parallel_size: 4
+    worker_cls: vllm_ascend.worker.worker.NPUWorker
+    default_sampling_params:
+      temperature: 0.6
+      top_p: 0.9
+      top_k: 50
+      max_tokens: 4072
+      stop_token_ids: [154830, 154827, 154824]
+      seed: 42
+      detokenize: false
+
+  - stage_id: 1
+    max_num_batched_tokens: 32768
+    max_num_seqs: 1
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    devices: "0,1,2,3"
+    distributed_executor_backend: "mp"
+    default_sampling_params:
+      seed: 42
+      num_inference_steps: 4
+      height: 512
+      width: 512
+
+platforms:
+  npu:
+    stages:
+      - stage_id: 0
+        env:
+          HCCL_IF_BASE_PORT: 25000
+          HCCL_HOST_SOCKET_PORT_RANGE: "25000-25199"
+          HCCL_NPU_SOCKET_PORT_RANGE: "25200-25399"
+      - stage_id: 1
+        env:
+          HCCL_IF_BASE_PORT: 26000
+          HCCL_HOST_SOCKET_PORT_RANGE: "26000-26199"
+          HCCL_NPU_SOCKET_PORT_RANGE: "26200-26399"
+          OMP_NUM_THREADS: "64"
+          VLLM_OMNI_API_SERVER_TORCH_THREADS: "64"
