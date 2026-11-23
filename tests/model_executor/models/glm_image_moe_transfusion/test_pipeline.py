@@ -1,8 +1,11 @@
 import inspect
+from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm_omni.config.stage_config import StageExecutionType
+from vllm_omni.diffusion.models.glm_image_moe_transfusion import pipeline as diffusion_pipeline
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.ar_model import (
     GlmImageMoeTransfusionForCausalLM,
 )
@@ -13,6 +16,7 @@ from vllm_omni.model_executor.models.glm_image_moe_transfusion.pipeline import (
     GLM_IMAGE_MOE_TRANSFUSION_PIPELINE,
     GLM_IMAGE_MOE_TRANSFUSION_THINK_PIPELINE,
 )
+from vllm_omni.errors import OmniClientError
 from vllm_omni.model_extras import build_text_to_image_tokenization
 
 
@@ -29,6 +33,93 @@ def test_thinking_pipeline_has_ar_then_diffusion() -> None:
     assert ar.engine_output_type == "token_ids"
     assert diffusion.execution_type is StageExecutionType.DIFFUSION
     assert diffusion.input_sources == (0,)
+
+
+def test_glm_image_pipeline_declares_request_batch_support() -> None:
+    assert diffusion_pipeline.GlmImageMoeTransfusionPipeline.supports_request_batch is True
+
+
+def test_request_spec_rejects_multiple_outputs() -> None:
+    sampling = SimpleNamespace(
+        num_outputs_per_prompt=2,
+        guidance_scale=1.0,
+        guidance_scale_provided=False,
+        height=512,
+        width=512,
+        num_inference_steps=4,
+        seed=1,
+        num_frames=1,
+        extra_args={},
+    )
+
+    with pytest.raises(OmniClientError, match="one image per request"):
+        diffusion_pipeline._validate_request_spec("a cat", sampling)
+
+
+def test_request_spec_rejects_negative_and_reference_inputs() -> None:
+    sampling = SimpleNamespace(
+        num_outputs_per_prompt=1,
+        guidance_scale=1.0,
+        guidance_scale_provided=False,
+        height=512,
+        width=512,
+        num_inference_steps=4,
+        seed=1,
+        num_frames=1,
+        extra_args={},
+    )
+
+    with pytest.raises(OmniClientError, match="negative_prompt"):
+        diffusion_pipeline._validate_request_spec(
+            {"prompt": "a cat", "negative_prompt": "blurry"},
+            sampling,
+        )
+    with pytest.raises(OmniClientError, match="reference or source images"):
+        diffusion_pipeline._validate_request_spec(
+            {"prompt": "a cat", "multi_modal_data": {"image": object()}},
+            sampling,
+        )
+
+
+def test_request_spec_accepts_request_local_generator() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(7)
+    sampling = SimpleNamespace(
+        num_outputs_per_prompt=1,
+        guidance_scale=1.0,
+        guidance_scale_provided=False,
+        height=512,
+        width=512,
+        num_inference_steps=4,
+        seed=1,
+        generator=generator,
+        num_frames=1,
+        extra_args={"generated_token_ids": [10, 11]},
+    )
+
+    spec = diffusion_pipeline._validate_request_spec("a cat", sampling)
+
+    assert spec.generator is generator
+    assert spec.generated_ids == [10, 11]
+
+
+def test_request_spec_relaxes_generic_warmup_cfg_settings() -> None:
+    sampling = SimpleNamespace(
+        num_outputs_per_prompt=1,
+        guidance_scale=4.0,
+        guidance_scale_provided=True,
+        do_classifier_free_guidance=True,
+        height=64,
+        width=64,
+        num_inference_steps=1,
+        seed=1,
+        num_frames=1,
+        extra_args={},
+    )
+
+    spec = diffusion_pipeline._validate_request_spec("dummy run", sampling, dummy=True)
+
+    assert spec.height == 64
+    assert spec.width == 64
 
 
 def test_ar_model_root_resolves_sibling_view(tmp_path) -> None:

@@ -4,6 +4,7 @@ async_chunk: false
 
 stages:
   - stage_id: 0
+    # Conservative default. Raise for compatible concurrent requests.
     max_num_seqs: 1
     gpu_memory_utilization: 0.45
     enforce_eager: true
@@ -25,7 +26,9 @@ stages:
 
   - stage_id: 1
     max_num_batched_tokens: 32768
+    # Request batching is supported, but 1024x1024 is faster serially on A2.
     max_num_seqs: 1
+    request_batch_max_wait_ms: 20
     enforce_eager: true
     trust_remote_code: true
     enable_prefix_caching: false

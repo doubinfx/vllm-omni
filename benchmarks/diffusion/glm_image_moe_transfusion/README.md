@@ -1,9 +1,11 @@
 # GLM-Image MoE Transfusion Baselines
 
 These tools record reproducible direct and thinking serving latencies and compare
-paired outputs from a reference runtime with vLLM-Omni.
+paired outputs from a reference runtime with vLLM-Omni. The two-stage service
+selects direct or thinking mode per request through `think`, so changing modes
+does not require restarting the service.
 
-Start one serving mode at a time, then run the matching benchmark:
+Start the two-stage service, then run the benchmark:
 
 ```bash
 python benchmarks/diffusion/glm_image_moe_transfusion/benchmark_serving.py \
@@ -13,9 +15,19 @@ python benchmarks/diffusion/glm_image_moe_transfusion/benchmark_serving.py \
   --output-dir /path/to/omni-direct
 ```
 
-Use `--mode think` after restarting the service with the thinking topology. The
-benchmark links the wait in each measured mode because GLM-Image selects its
-topology at service startup.
+Use `--mode think` for thinking requests. GLM-Image routes `think=false`
+directly to diffusion and `think=true` through the AR stage before diffusion.
+
+The native diffusion pipeline supports request-level batching. Concurrent
+requests with compatible resolution, step count, guidance, and output settings
+share one diffusion forward up to the stage's `max_num_seqs`. A short
+`request_batch_max_wait_ms` can improve burst coalescing without changing the
+OpenAI request format.
+
+The deploy profile keeps `max_num_seqs=1` as the conservative default. On
+four-card 910B, 512x512 benefited from batching, while 1024x1024 was slower than
+serial execution at the current kernel shapes. Raise the value per workload
+after validating latency, throughput, and memory.
 
 Compare matching reference and candidate images:
 

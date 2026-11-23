@@ -109,6 +109,20 @@ def _apply_rotary(
     *,
     interleaved: bool,
 ) -> torch.Tensor:
+    if hidden_states.shape[0] > 1:
+        # aclnnRotaryPositionEmbeddingV2 on A2 rejects batched 4D inputs.
+        return torch.cat(
+            [
+                _apply_rotary(
+                    hidden_states[index : index + 1],
+                    cos[index : index + 1],
+                    sin[index : index + 1],
+                    interleaved=interleaved,
+                )
+                for index in range(hidden_states.shape[0])
+            ],
+            dim=0,
+        )
     npu = _get_npu()
     output_dtype = hidden_states.dtype
     cos = cos.to(hidden_states.device)

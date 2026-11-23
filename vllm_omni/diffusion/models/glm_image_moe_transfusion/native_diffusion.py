@@ -200,22 +200,43 @@ def _select_mrope(
     return cos.unsqueeze(0).contiguous(), sin.unsqueeze(0).contiguous()
 
 
-def _packed_attention_mask(text_len: int, image_len: int, device: torch.device) -> torch.Tensor:
-    """Text is causal; generated latent rows see text and all latent rows."""
-    length = text_len + image_len
-    allowed = torch.zeros((length, length), dtype=torch.bool, device=device)
-    text_indices = torch.arange(text_len, device=device)
-    allowed[:text_len, :text_len] = text_indices[:, None] >= text_indices[None, :]
-    allowed[text_len:, :text_len] = True
-    allowed[text_len:, text_len:] = True
+def _packed_attention_mask_batch(
+    text_lengths: list[int],
+    image_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build one padded mask while keeping every request's text isolated."""
+    if not text_lengths or any(text_len <= 0 for text_len in text_lengths):
+        raise ValueError(f"text lengths must be positive, got {text_lengths}")
+    if image_len <= 0:
+        raise ValueError(f"image length must be positive, got {image_len}")
+
+    batch_size = len(text_lengths)
+    padded_text_len = max(text_lengths)
+    length = padded_text_len + image_len
+    allowed = torch.zeros((batch_size, length, length), dtype=torch.bool, device=device)
+    for batch_index, text_len in enumerate(text_lengths):
+        text_indices = torch.arange(text_len, device=device)
+        allowed[batch_index, :text_len, :text_len] = text_indices[:, None] >= text_indices[None, :]
+        if text_len < padded_text_len:
+            padding = torch.arange(text_len, padded_text_len, device=device)
+            allowed[batch_index, padding, padding] = True
+        allowed[batch_index, padded_text_len:, :text_len] = True
+        allowed[batch_index, padded_text_len:, padded_text_len:] = True
+
     mask = torch.full(
-        (1, 1, length, length),
+        (batch_size, 1, length, length),
         torch.finfo(torch.bfloat16).min,
         dtype=torch.bfloat16,
         device=device,
     )
-    mask.masked_fill_(allowed, 0)
+    mask.masked_fill_(allowed[:, None], 0)
     return mask
+
+
+def _packed_attention_mask(text_len: int, image_len: int, device: torch.device) -> torch.Tensor:
+    """Text is causal; generated latent rows see text and all latent rows."""
+    return _packed_attention_mask_batch([text_len], image_len, device)
 
 
 class NativeGlmImageMoeDiffusion(nn.Module):
@@ -287,7 +308,6 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         self.rope_layout = "qwen3"
         self.fused_attention = use_a2_fused_attention()
         self.fused_moe = use_a2_fused_moe()
-        self._npu_attention_mask: torch.Tensor | None = None
         if self.fused_attention or self.fused_moe:
             self._install_module_adapters()
         logger.info(
@@ -316,15 +336,16 @@ class NativeGlmImageMoeDiffusion(nn.Module):
             use_cache: bool | None = False,
             **kwargs: object,
         ):
-            del attention_mask, use_cache, kwargs
-            if self._npu_attention_mask is None:
+            del use_cache, kwargs
+            if attention_mask is None:
                 raise RuntimeError("A2 fused attention requires a packed attention mask")
             if past_key_values is not None:
                 raise RuntimeError("A2 fused attention does not support KV cache")
+            npu_mask = attention_mask if attention_mask.dtype == torch.bool else attention_mask < 0
             return a2_attention_forward(
                 module,
                 hidden_states,
-                self._npu_attention_mask,
+                npu_mask,
                 position_embeddings,
             )
 
@@ -415,44 +436,112 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         )
         return position_ids, image_mask, image_len
 
-    def predict_velocity(
+    def _batch_position_tensors(
         self,
-        layout: GlmImageTokenLayout,
+        layouts: list[GlmImageTokenLayout],
+    ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+        position_rows: list[torch.Tensor] = []
+        image_masks: list[torch.Tensor] = []
+        image_len: int | None = None
+        for layout in layouts:
+            position_ids, image_mask, current_image_len = self._position_tensors(layout)
+            if image_len is None:
+                image_len = current_image_len
+            elif current_image_len != image_len:
+                raise ValueError(
+                    "GLM-Image request batching requires one image resolution; "
+                    f"got image lengths {image_len} and {current_image_len}"
+                )
+            position_rows.append(position_ids)
+            image_masks.append(image_mask)
+
+        assert image_len is not None
+        texts = [layout.anchor for layout in layouts]
+        padded_text_len = max(texts)
+        length = padded_text_len + image_len
+        positions = torch.zeros(
+            (len(layouts), 3, length),
+            dtype=torch.long,
+            device=self.extra_device,
+        )
+        image_mask = torch.zeros(
+            (len(layouts), length),
+            dtype=torch.bool,
+            device=self.extra_device,
+        )
+        for batch_index, (text_len, text_positions, current_image_mask) in enumerate(
+            zip(texts, position_rows, image_masks, strict=True)
+        ):
+            positions[batch_index, :, :text_len] = text_positions[:, :text_len]
+            positions[batch_index, :, padded_text_len:] = text_positions[:, text_len:]
+            image_mask[batch_index, padded_text_len:] = current_image_mask[text_len:]
+        return positions, image_mask, padded_text_len, image_len
+
+    def predict_velocity_batch(
+        self,
+        layouts: list[GlmImageTokenLayout],
         latents: torch.Tensor,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        input_ids = torch.tensor(
-            layout.input_ids[: layout.anchor],
+        if not layouts:
+            raise ValueError("GLM-Image request batch must not be empty")
+        batch_size = len(layouts)
+        if latents.shape[0] != batch_size:
+            raise ValueError(f"latent batch {latents.shape[0]} != request batch {batch_size}")
+
+        text_lengths = [layout.anchor for layout in layouts]
+        padded_text_len = max(text_lengths)
+        input_ids = torch.zeros(
+            (batch_size, padded_text_len),
             dtype=torch.long,
             device=self.extra_device,
-        ).unsqueeze(0)
+        )
+        for batch_index, layout in enumerate(layouts):
+            text_len = layout.anchor
+            input_ids[batch_index, :text_len] = torch.tensor(
+                layout.input_ids[:text_len],
+                dtype=torch.long,
+                device=self.extra_device,
+            )
         text_hidden = self.backbone.model.embed_tokens(input_ids)
 
-        position_ids, image_mask, image_len = self._position_tensors(layout)
-        if latents.shape[0] != image_len:
-            raise ValueError(f"latent rows {latents.shape[0]} != image grid {image_len}")
+        position_ids, image_mask, padded_text_len, image_len = self._batch_position_tensors(layouts)
+        if latents.shape[1] != image_len:
+            raise ValueError(f"latent rows {latents.shape[1]} != image grid {image_len}")
+        if timestep.numel() == 1:
+            timestep = timestep.expand(batch_size)
+        if timestep.shape != (batch_size,):
+            raise ValueError(f"timestep shape {tuple(timestep.shape)} != ({batch_size},)")
         time_embedding = self.diff_time_embed(timestep.float() * 1000.0)
         scale, shift = self.diff_adaln_in(time_embedding).chunk(2, dim=-1)
         image_hidden = self.diff_input_proj(latents)
         image_hidden = _adaln_apply(
             image_hidden,
-            scale,
-            shift,
+            scale.unsqueeze(1),
+            shift.unsqueeze(1),
             self.rms_eps,
-        ).unsqueeze(0)
-
-        hidden_states = torch.cat((text_hidden[0], image_hidden[0]), dim=0).unsqueeze(0)
-        cos, sin = _select_mrope(
-            position_ids,
-            image_mask,
-            inv_freq=self.inv_freq,
-            sections=self.rope_sections,
-            layout=self.rope_layout,
         )
+
+        hidden_states = torch.cat((text_hidden, image_hidden), dim=1)
+        rope_tables = [
+            _select_mrope(
+                position_ids[batch_index],
+                image_mask[batch_index],
+                inv_freq=self.inv_freq,
+                sections=self.rope_sections,
+                layout=self.rope_layout,
+            )
+            for batch_index in range(batch_size)
+        ]
+        cos = torch.stack([table[0].squeeze(0) for table in rope_tables])
+        sin = torch.stack([table[1].squeeze(0) for table in rope_tables])
         cos = cos.to(hidden_states.dtype)
         sin = sin.to(hidden_states.dtype)
-        attention_mask = _packed_attention_mask(layout.anchor, image_len, self.extra_device)
-        self._npu_attention_mask = attention_mask[0, 0] < 0 if self.fused_attention else None
+        attention_mask = _packed_attention_mask_batch(
+            text_lengths,
+            image_len,
+            self.extra_device,
+        )
 
         for layer in self.backbone.model.layers:
             hidden_states = layer(
@@ -462,8 +551,8 @@ class NativeGlmImageMoeDiffusion(nn.Module):
             )
         hidden_states = self.backbone.model.norm(hidden_states)
         image_indices = torch.arange(
-            layout.anchor,
-            layout.anchor + image_len,
+            padded_text_len,
+            padded_text_len + image_len,
             device=hidden_states.device,
         )
         # A2 cannot lower a BF16 basic slice here, so use index_select rather
@@ -472,11 +561,23 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         output_scale, output_shift = self.diff_adaln_out(time_embedding).chunk(2, dim=-1)
         image_hidden = _adaln_apply(
             image_hidden,
-            output_scale,
-            output_shift,
+            output_scale.unsqueeze(1),
+            output_shift.unsqueeze(1),
             self.rms_eps,
         )
-        return self.diff_output_proj(image_hidden).squeeze(0)
+        return self.diff_output_proj(image_hidden)
+
+    def predict_velocity(
+        self,
+        layout: GlmImageTokenLayout,
+        latents: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.predict_velocity_batch(
+            [layout],
+            latents.unsqueeze(0),
+            timestep,
+        ).squeeze(0)
 
 
 class NativeGlmImageGenerator:
@@ -586,6 +687,90 @@ class NativeGlmImageGenerator:
         return decoded.clamp(-1.0, 1.0)
 
     @torch.no_grad()
+    def generate_batch(
+        self,
+        prompts: list[str],
+        *,
+        height: int = 512,
+        width: int = 512,
+        num_steps: int = 4,
+        seeds: list[int] | None = None,
+        generated_ids: list[list[int]] | None = None,
+        generators: list[torch.Generator | None] | None = None,
+    ) -> torch.Tensor:
+        if not prompts:
+            raise ValueError("GLM-Image request batch must not be empty")
+        batch_size = len(prompts)
+        seeds = seeds or [0] * batch_size
+        generated_ids = generated_ids or [[] for _ in prompts]
+        generators = generators or [None] * batch_size
+        if len(seeds) != batch_size or len(generated_ids) != batch_size or len(generators) != batch_size:
+            raise ValueError("GLM-Image batch seeds, generated IDs, and generators must match prompts")
+
+        layouts = [
+            build_diffusion_layout(self.tokenizer, prompt, height, width, request_ids)
+            for prompt, request_ids in zip(prompts, generated_ids, strict=True)
+        ]
+        image_len = layouts[0].grid_h * layouts[0].grid_w
+        if any(current.grid_h * current.grid_w != image_len for current in layouts):
+            raise ValueError("GLM-Image request batching requires one image resolution")
+
+        request_generators: list[torch.Generator] = []
+        for seed, generator in zip(seeds, generators, strict=True):
+            if generator is None:
+                generator = torch.Generator(device=self.model.extra_device).manual_seed(seed)
+            elif generator.device != self.model.extra_device:
+                raise ValueError(
+                    f"generator device {generator.device} does not match {self.model.extra_device}"
+                )
+            request_generators.append(generator)
+
+        latents = torch.stack(
+            [
+                torch.randn(
+                    (image_len, self.model.anchor_patch_dim),
+                    generator=generator,
+                    device=self.model.extra_device,
+                    dtype=torch.bfloat16,
+                )
+                for generator in request_generators
+            ],
+            dim=0,
+        )
+        timesteps = self._timesteps(image_len, num_steps)
+        for step in range(num_steps):
+            current = timesteps[step].to(self.model.extra_device)
+            next_step = timesteps[step + 1].to(self.model.extra_device)
+            velocity = self.model.predict_velocity_batch(
+                layouts,
+                latents,
+                current.view(1).expand(batch_size),
+            )
+            # GLM-Image's DMD2 student uses the renoise sampler:
+            # x0 = x_t - t*v, then x_t-1 = (1-t_next)*x0 + t_next*eps.
+            x0 = latents.float() - current.float() * velocity.float()
+            noise = torch.stack(
+                [
+                    torch.randn(
+                        (image_len, self.model.anchor_patch_dim),
+                        generator=generator,
+                        device=self.model.extra_device,
+                        dtype=torch.float32,
+                    )
+                    for generator in request_generators
+                ],
+                dim=0,
+            )
+            latents = ((1.0 - next_step.float()) * x0 + next_step.float() * noise).to(latents.dtype)
+        return torch.cat(
+            [
+                self._decode_latents(latents[batch_index : batch_index + 1], layout)
+                for batch_index, layout in enumerate(layouts)
+            ],
+            dim=0,
+        )
+
+    @torch.no_grad()
     def generate(
         self,
         prompt: str,
@@ -595,39 +780,14 @@ class NativeGlmImageGenerator:
         num_steps: int = 4,
         seed: int = 1234,
         generated_ids: list[int] | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        layout = build_diffusion_layout(
-            self.tokenizer,
-            prompt,
-            height,
-            width,
-            generated_ids or (),
+        return self.generate_batch(
+            [prompt],
+            height=height,
+            width=width,
+            num_steps=num_steps,
+            seeds=[seed],
+            generated_ids=[generated_ids or []],
+            generators=[generator],
         )
-        image_len = layout.grid_h * layout.grid_w
-        generator = torch.Generator(device=self.model.extra_device).manual_seed(seed)
-        latents = torch.randn(
-            (image_len, self.model.anchor_patch_dim),
-            generator=generator,
-            device=self.model.extra_device,
-            dtype=torch.bfloat16,
-        )
-        timesteps = self._timesteps(image_len, num_steps)
-        for step in range(num_steps):
-            current = timesteps[step].to(self.model.extra_device)
-            next_step = timesteps[step + 1].to(self.model.extra_device)
-            velocity = self.model.predict_velocity(
-                layout,
-                latents,
-                current.view(1),
-            )
-            # GLM-Image's DMD2 student uses the renoise sampler:
-            # x0 = x_t - t*v, then x_t-1 = (1-t_next)*x0 + t_next*eps.
-            x0 = latents.float() - current.float() * velocity.float()
-            noise = torch.randn(
-                x0.shape,
-                generator=generator,
-                device=self.model.extra_device,
-                dtype=torch.float32,
-            )
-            latents = ((1.0 - next_step.float()) * x0 + next_step.float() * noise).to(latents.dtype)
-        return self._decode_latents(latents.unsqueeze(0), layout)

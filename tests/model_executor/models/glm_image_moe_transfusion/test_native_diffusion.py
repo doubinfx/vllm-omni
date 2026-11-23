@@ -73,6 +73,103 @@ def test_packed_attention_mask_covers_text_and_image_rows():
     assert mask[0, 0, :3, 3:].eq(masked).all()
 
 
+def test_batched_attention_mask_pads_text_without_cross_request_rows():
+    mask = native_diffusion._packed_attention_mask_batch(
+        text_lengths=[2, 3],
+        image_len=2,
+        device=torch.device("cpu"),
+    )
+    masked = torch.finfo(torch.bfloat16).min
+
+    assert mask.shape == (2, 1, 5, 5)
+    assert mask[0, 0, 3:, :2].eq(0).all()
+    assert mask[0, 0, 3:, 2].eq(masked).all()
+    assert mask[1, 0, 3:, :3].eq(0).all()
+    assert mask[0, 0, 2, 2].eq(0)
+
+
+def test_batched_positions_keep_request_local_text_lengths():
+    model = object.__new__(native_diffusion.NativeGlmImageMoeDiffusion)
+    model.extra_device = torch.device("cpu")
+    layouts = [
+        native_diffusion.GlmImageTokenLayout(
+            input_ids=(1, 2, 3),
+            anchor=2,
+            prefix_len=2,
+            grid_h=1,
+            grid_w=1,
+            user_text="short",
+        ),
+        native_diffusion.GlmImageTokenLayout(
+            input_ids=(1, 2, 4, 3),
+            anchor=3,
+            prefix_len=3,
+            grid_h=1,
+            grid_w=1,
+            user_text="longer",
+        ),
+    ]
+
+    positions, image_mask, padded_text_len, image_len = model._batch_position_tensors(layouts)
+
+    assert padded_text_len == 3
+    assert image_len == 1
+    assert positions.shape == (2, 3, 4)
+    assert positions[0, 0, -1].item() == 2
+    assert positions[1, 0, -1].item() == 3
+    assert image_mask[:, -1].all()
+    assert not image_mask[:, :padded_text_len].any()
+
+
+def test_adaln_broadcasts_request_local_conditioning():
+    hidden = torch.randn((2, 5, 8), dtype=torch.float32)
+    scale = torch.randn((2, 8), dtype=torch.float32)
+    shift = torch.randn((2, 8), dtype=torch.float32)
+
+    batched = native_diffusion._adaln_apply(
+        hidden,
+        scale.unsqueeze(1),
+        shift.unsqueeze(1),
+        1e-5,
+    )
+    separate = torch.cat(
+        [
+            native_diffusion._adaln_apply(
+                hidden[index : index + 1],
+                scale[index : index + 1],
+                shift[index : index + 1],
+                1e-5,
+            )
+            for index in range(2)
+        ]
+    )
+
+    assert torch.allclose(batched, separate)
+
+
+def test_a2_rotary_splits_unsupported_batch_input(monkeypatch):
+    calls = []
+
+    def rotary(hidden, cos, sin, *, rotary_mode):
+        calls.append((hidden.shape, cos.shape, sin.shape, rotary_mode))
+        return hidden
+
+    monkeypatch.setattr(
+        a2_kernels,
+        "_get_npu",
+        lambda: SimpleNamespace(npu_rotary_mul=rotary),
+    )
+    hidden = torch.randn((2, 3, 4, 8))
+    cos = torch.randn((2, 3, 8))
+    sin = torch.randn((2, 3, 8))
+
+    output = a2_kernels._apply_rotary(hidden, cos, sin, interleaved=False)
+
+    assert output.shape == hidden.shape
+    assert len(calls) == 2
+    assert all(shape[0] == 1 for shape, _, _, _ in calls)
+
+
 def test_select_mrope_returns_single_request_tables():
     position_ids = torch.zeros((3, 7), dtype=torch.long)
     image_mask = torch.zeros((7,), dtype=torch.bool)
