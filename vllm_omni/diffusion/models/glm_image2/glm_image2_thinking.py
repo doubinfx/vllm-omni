@@ -33,15 +33,33 @@ def sample_next_token(
     if temperature <= 0:
         return int(logits.argmax())
     logits = logits / temperature
+    candidate_ids = None
     if 0 < top_k < logits.numel():
-        threshold = torch.topk(logits, top_k).values[-1]
-        logits = logits.masked_fill(logits < threshold, float("-inf"))
-    probs = logits.softmax(-1)
+        candidates, candidate_ids = torch.topk(logits, top_k)
+    else:
+        candidates = logits
+    probs = candidates.softmax(-1)
     if 0 < top_p < 1:
         ordered, order = torch.sort(probs, descending=True)
         ordered = ordered.masked_fill(ordered.cumsum(-1) - ordered > top_p, 0)
-        probs = torch.zeros_like(probs).index_copy(0, order, ordered)
-    return int(torch.multinomial(probs / probs.sum(), 1, generator=generator))
+        if candidate_ids is not None:
+            probs = torch.zeros_like(logits).index_copy(
+                0,
+                candidate_ids[order],
+                ordered,
+            )
+            candidate_ids = None
+        else:
+            probs = torch.zeros_like(probs).index_copy(0, order, ordered)
+    elif candidate_ids is not None:
+        probs = torch.zeros_like(logits).index_copy(
+            0,
+            candidate_ids,
+            probs,
+        )
+        candidate_ids = None
+    sampled = int(torch.multinomial(probs / probs.sum(), 1, generator=generator))
+    return int(candidate_ids[sampled]) if candidate_ids is not None else sampled
 
 
 @torch.inference_mode()

@@ -81,6 +81,39 @@ def test_sample_next_token_is_seeded_and_truncated():
     assert sample_next_token(logits, torch.Generator(), temperature=0) == 99
 
 
+def test_top_k_sampling_preserves_existing_token_sequence():
+    def reference(logits, generator):
+        logits = logits.float() / 0.6
+        threshold = torch.topk(logits, 50).values[-1]
+        logits = logits.masked_fill(logits < threshold, float("-inf"))
+        probs = logits.softmax(-1)
+        ordered, order = torch.sort(probs, descending=True)
+        ordered = ordered.masked_fill(
+            ordered.cumsum(-1) - ordered > 0.9,
+            0,
+        )
+        probs = torch.zeros_like(probs).index_copy(0, order, ordered)
+        return int(
+            torch.multinomial(
+                probs / probs.sum(),
+                1,
+                generator=generator,
+            )
+        )
+
+    logits = torch.randn(160_000)
+    for seed in range(20):
+        expected = reference(
+            logits,
+            torch.Generator().manual_seed(seed),
+        )
+        actual = sample_next_token(
+            logits,
+            torch.Generator().manual_seed(seed),
+        )
+        assert actual == expected
+
+
 def test_generate_reasoning_stops_before_the_model_size_tokens():
     script = [THINK_START_ID, 11, THINK_END_ID, 12, 13, SOP_ID, 99]
     decoder = _ScriptedDecoder(script)
