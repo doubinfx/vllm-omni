@@ -900,10 +900,15 @@ class GlmImage2Transformer(nn.Module):
     # ---------------------------------------------------------------- inputs
 
     def _embed_latents(
-        self, latents: torch.Tensor, timesteps: torch.Tensor, lengths: torch.Tensor | None = None
+        self,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        lengths: torch.Tensor | None = None,
+        time_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Project packed latents and apply per-image AdaLN input modulation (one image if ``lengths`` is None)."""
-        time_embedding = self.diff_time_embed(timesteps)
+        if time_embedding is None:
+            time_embedding = self.diff_time_embed(timesteps)
         modulation = self.diff_adaln_in(time_embedding)
         if lengths is None:
             modulation = modulation.expand(latents.shape[0], -1)
@@ -1034,7 +1039,12 @@ class GlmImage2Transformer(nn.Module):
             raise ValueError("Target latent count does not match the prefix cache.")
         num_branches = len(prefix_caches)
         timesteps = timestep.reshape(1).to(latents.device)
-        hidden_states = self._embed_latents(latents, timesteps).repeat(num_branches, 1)
+        time_embedding = self.diff_time_embed(timesteps)
+        hidden_states = self._embed_latents(
+            latents,
+            timesteps,
+            time_embedding=time_embedding,
+        ).repeat(num_branches, 1)
         if num_branches == 1:
             cos, sin = prefix_caches[0].target_cos, prefix_caches[0].target_sin
         else:
@@ -1043,14 +1053,14 @@ class GlmImage2Transformer(nn.Module):
 
         # The decoder layers update their input in place (fused add + RMSNorm), so TeaCache keeps a copy.
         layer_input = hidden_states.clone() if teacache is not None else hidden_states
-        if teacache is not None and not teacache.should_compute(self.diff_time_embed(timesteps), force_compute):
+        if teacache is not None and not teacache.should_compute(time_embedding, force_compute):
             hidden_states = (layer_input.float() + teacache.residual).to(hidden_states.dtype)
         else:
             with self._vllm_forward_context():
                 hidden_states, _ = self._run_layers(hidden_states, cos, sin, [], prefix_caches, False)
             if teacache is not None:
                 teacache.residual = hidden_states.float() - layer_input.float()
-        modulation = self.diff_adaln_out(self.diff_time_embed(timesteps)).expand(hidden_states.shape[0], -1)
+        modulation = self.diff_adaln_out(time_embedding).expand(hidden_states.shape[0], -1)
         image_states = _modulate(hidden_states.float(), modulation, self.rms_norm_eps).to(hidden_states.dtype)
         velocity = self.diff_output_proj(image_states.to(self.diff_output_proj.weight.dtype))
         return velocity.view(num_branches, num_tokens, -1)
