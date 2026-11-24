@@ -204,6 +204,21 @@ def _apply_exact_a2_rms_norm(
     residual: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Fuse small-row RMSNorm while preserving vLLM's exact BF16 rounding."""
+    if (
+        residual is None
+        and hidden_states.device.type == "npu"
+        and hidden_states.dtype == torch.bfloat16
+        and module.weight.dtype == torch.bfloat16
+        and hidden_states.ndim == 2
+        and getattr(module, "variance_size_override", None) is None
+        and not torch.compiler.is_compiling()
+    ):
+        return _get_torch_npu().npu_rms_norm(
+            hidden_states,
+            module.weight,
+            module.variance_epsilon,
+        )[0]
+
     eligible = (
         HAS_TRITON
         and hidden_states.device.type == "npu"

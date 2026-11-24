@@ -106,7 +106,15 @@ def test_a2_dense_attention_uses_native_fusion(monkeypatch):
 )
 @pytest.mark.parametrize(
     ("hidden_size", "rows"),
-    [(512, 1), (768, 1), (2048, 1), (2048, 64)],
+    [
+        (512, 1),
+        (512, 1024),
+        (768, 1),
+        (768, 1024),
+        (2048, 1),
+        (2048, 64),
+        (2048, 1024),
+    ],
 )
 def test_exact_a2_rms_norm_matches_vllm_ir(hidden_size, rows):
     from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
