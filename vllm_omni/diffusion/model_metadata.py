@@ -61,6 +61,8 @@ HUNYUAN_IMAGE3_MAX_INPUT_IMAGES = 3
 # Boogu-Image editing (TI2I) supports a single reference image for now.
 BOOGU_IMAGE_MAX_INPUT_IMAGES = 1
 FLUX3_MAX_INPUT_IMAGES = 10
+# GLM-Image-2 edit evaluation sets use up to three reference images.
+GLM_IMAGE2_MAX_INPUT_IMAGES = 3
 
 
 _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
@@ -78,6 +80,10 @@ _DIFFUSION_MODEL_METADATA: dict[str, DiffusionModelMetadata] = {
         supports_video_segmentation=True,
     ),
     "VideoDepthAnythingPipeline": DiffusionModelMetadata(supports_video_depth=True),
+    "GlmImage2Pipeline": DiffusionModelMetadata(
+        supports_multimodal_inputs=True,
+        max_multimodal_image_inputs=GLM_IMAGE2_MAX_INPUT_IMAGES,
+    ),
     "Flux2KleinPipeline": DiffusionModelMetadata(
         supports_multimodal_inputs=True,
         max_multimodal_image_inputs=FLUX2_KLEIN_MAX_INPUT_IMAGES,

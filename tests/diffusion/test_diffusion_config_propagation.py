@@ -20,6 +20,7 @@ from vllm_omni.diffusion.data import (
 from vllm_omni.diffusion.diffusion_kv.config import DiffusionKVCacheMode
 from vllm_omni.diffusion.model_metadata import (
     FLUX2_KLEIN_MAX_INPUT_IMAGES,
+    GLM_IMAGE2_MAX_INPUT_IMAGES,
     HUNYUAN_IMAGE3_MAX_INPUT_IMAGES,
     QWEN_IMAGE_EDIT_PLUS_MAX_INPUT_IMAGES,
 )
@@ -343,6 +344,14 @@ def test_architecture_name_resolves_via_pipeline_class_fallback():
 
     assert hunyuan_od_config.supports_multimodal_inputs is True
     assert hunyuan_od_config.max_multimodal_image_inputs == HUNYUAN_IMAGE3_MAX_INPUT_IMAGES
+
+
+def test_glm_image2_accepts_multiple_reference_images():
+    od_config = OmniDiffusionConfig(model="zai-org/GLM-Image-2", model_class_name="GlmImage2Pipeline")
+    od_config.update_multimodal_support()
+
+    assert od_config.supports_multimodal_inputs is True
+    assert od_config.max_multimodal_image_inputs == GLM_IMAGE2_MAX_INPUT_IMAGES
 
 
 def test_architecture_only_checkpoint_propagates_multimodal_limit(tmp_path):

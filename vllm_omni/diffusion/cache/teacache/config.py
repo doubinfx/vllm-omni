@@ -111,6 +111,17 @@ _MODEL_COEFFICIENTS = {
         -1.04182570e01,
         6.78098549e-01,
     ],
+    # GLM-Image2 pipeline coefficients
+    # Calibrated via polyfit on 312 data points (8 prompts x 39 steps, 1024x1024, 40 steps,
+    # CFG 4.0). Maps the timestep-embedding rel_l1 (~0.07-0.44) to the decoder-residual
+    # rel_l1 (~0.05-0.31), R^2 0.59; the loop always computes the first and last step.
+    "GlmImage2Pipeline": [
+        5.39473322e01,
+        -4.75207408e01,
+        1.21424614e01,
+        -3.50158433e-01,
+        4.52349557e-02,
+    ],
     # Flux2 transformer coefficients
     # Copied from Qwen-Image, still uncalibrated; tracked in #8411 together with
     # the Flux2Klein borrow and the Ming subclasses of ZImageTransformer2DModel.

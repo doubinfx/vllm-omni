@@ -48,6 +48,7 @@ th {
 | `QwenImageEditPlusPipeline` | Qwen-Image-Edit-2511 | `Qwen/Qwen-Image-Edit-2511` | ✅︎ | ✅︎ | ✅︎ | ✅︎ | — |
 | `QwenImage21Pipeline` | Qwen-Image-2.1 (T2I + image-conditioned generation, up to 10 condition images) | `Qwen/Qwen-Image-2.1`, `Qwen/Qwen-Image-2.1-Turbo` | ✅︎ | | | ✅︎ | [Repository](https://github.com/vllm-project/vllm-omni/blob/main/recipes/Qwen/Qwen-Image-2.1.md) |
 | `GlmImagePipeline` | GLM-Image | `zai-org/GLM-Image` | ✅︎ | ✅︎ | | | — |
+| `GlmImage2Pipeline` | GLM-Image2 (T2I + reference-image generation) | `zai-org/GLM-Image-2` | Experimental | | | | — |
 | `ZImagePipeline` | Z-Image | `Tongyi-MAI/Z-Image-Turbo` | ✅︎ | ✅︎ | ✅︎ | ✅︎ | [Repository](https://github.com/vllm-project/vllm-omni/blob/main/recipes/Tongyi-MAI/Z-Image-Turbo.md) |
 | `Krea2Pipeline` | Krea 2 (Raw + Turbo) | `krea/Krea-2-Raw`, `krea/Krea-2-Turbo` | ✅︎ | | | ✅︎ | [Repository](https://github.com/vllm-project/vllm-omni/blob/main/recipes/krea/Krea-2.md) |
 | `MOSSImagePipeline` | MOSS-Image-Base | `OpenMOSS-Team/MOSS-Image-Base` | ✅︎ | | | | [Repository](https://github.com/vllm-project/vllm-omni/blob/main/recipes/MOSS-Image/MOSS-Image-Base.md) |

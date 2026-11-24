@@ -44,6 +44,20 @@ def enable_hunyuan_image3_teacache(pipeline: Any, config: DiffusionCacheConfig) 
     logger.info(f"TeaCache enabled for HunyuanImage3 with rel_l1_thresh={teacache_config.rel_l1_thresh}")
 
 
+def enable_glm_image2_teacache(pipeline: Any, config: DiffusionCacheConfig) -> None:
+    """Enable TeaCache for GLM-Image2.
+
+    The decoder runs a per-request prefix cache, so the denoising loop owns the
+    skip decision (``GlmImage2TeaCacheState``) instead of a forward hook.
+    """
+    pipeline._tea_cache_config = TeaCacheConfig(
+        transformer_type="GlmImage2Pipeline",
+        rel_l1_thresh=config.rel_l1_thresh,
+        coefficients=config.coefficients,
+    )
+    logger.info(f"TeaCache enabled for GLM-Image2 with rel_l1_thresh={pipeline._tea_cache_config.rel_l1_thresh}")
+
+
 def enable_bagel_teacache(pipeline: Any, config: DiffusionCacheConfig) -> None:
     """
     Enable TeaCache for Bagel model.
@@ -184,6 +198,7 @@ CUSTOM_TEACACHE_ENABLERS = {
     "BagelPipeline": enable_bagel_teacache,
     "Flux2KleinPipeline": enable_flux2_klein_teacache,
     "HunyuanImage3Pipeline": enable_hunyuan_image3_teacache,
+    "GlmImage2Pipeline": enable_glm_image2_teacache,
     "MingImageDiffusionPipeline": enable_ming_image_teacache,
     "MammothModa2DiTPipeline": enable_mammoth_moda2_teacache,
     "Kandinsky6TI2VAPipeline": enable_kandinsky6_teacache,

@@ -2161,6 +2161,23 @@ stages:
 
         assert pipeline is None
 
+    def test_single_stage_diffusion_class_skips_basename_fallback(self):
+        # "GLM-Image-2" contains the multi-stage "glm_image" key, but its
+        # model_index.json names the single-stage GlmImage2Pipeline.
+        def get_model_file(filename, _model, revision=None):
+            del revision
+            if filename == "model_index.json":
+                return {"_class_name": "GlmImage2Pipeline"}
+            return None
+
+        with (
+            patch.object(StageConfigFactory, "get_hf_config", return_value=None),
+            patch("vllm_omni.config.config_factory.get_hf_file_to_dict", side_effect=get_model_file),
+        ):
+            pipeline = StageConfigFactory.get_pipeline_config(model="zai-org/GLM-Image-2", trust_remote_code=False)
+
+        assert pipeline is None
+
     @pytest.mark.parametrize("deploy_name", ["step_audio_2.yaml", "step_audio_2_async_chunk.yaml"])
     def test_step_audio2_deploy_configs_fit_two_gpus(self, deploy_name):
         deploy = load_deploy_config(Path(get_deploy_config_path(deploy_name)))

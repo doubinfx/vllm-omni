@@ -176,6 +176,15 @@ def _extract_images_from_result(result: Any) -> list[Any]:
     return [_normalize_image(img) for img in flattened]
 
 
+def _extract_revised_prompt_from_result(result: Any) -> str | None:
+    """Prompt the model rewrote the request into (text metadata ``text_output``), if any."""
+    output = getattr(result, "multimodal_output", None)
+    metadata = output.get("metadata") if isinstance(output, dict) else None
+    text = metadata.get("text") if isinstance(metadata, dict) else None
+    revised = text.get("text_output") if isinstance(text, dict) else None
+    return revised if isinstance(revised, str) and revised else None
+
+
 def _generated_size_str(images: list[Any], fallback: str | None) -> str | None:
     """``"WxH"`` of the first generated image, or ``fallback`` when it is unknown."""
     size = getattr(images[0], "size", None) if images else None

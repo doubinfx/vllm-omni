@@ -2572,6 +2572,16 @@ def test_extract_images_from_result():
     assert images[0].size == (32, 32)
 
 
+def test_extract_revised_prompt_from_result():
+    from vllm_omni.entrypoints.openai.images.helpers import _extract_revised_prompt_from_result
+
+    caption = {"metadata": {"text": {"think_text": "plan", "text_output": "a red bicycle"}}}
+    assert _extract_revised_prompt_from_result(SimpleNamespace(multimodal_output=caption)) == "a red bicycle"
+    assert _extract_revised_prompt_from_result(SimpleNamespace(multimodal_output={"metadata": {}})) is None
+    assert _extract_revised_prompt_from_result(SimpleNamespace(multimodal_output=None)) is None
+    assert _extract_revised_prompt_from_result(SimpleNamespace()) is None
+
+
 # ---------------------------------------------------------------------------
 # _check_max_generated_image_size unit tests
 # ---------------------------------------------------------------------------

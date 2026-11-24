@@ -144,6 +144,7 @@ from vllm_omni.entrypoints.openai.images.helpers import (
     _choose_output_format,
     _extract_images_from_result,
     _extract_segmentation_instances,
+    _extract_revised_prompt_from_result,
     _generated_size_str,
     _get_max_edit_input_images,
     _load_input_images,
@@ -2335,6 +2336,7 @@ def _build_image_generation_response(
     stage_durations: Any,
     peak_memory_mb: Any,
     response_metrics: Any = None,
+    revised_prompt: str | None = None,
 ) -> ImageGenerationResponse | StreamingResponse:
     """Encode generated images and apply the requested response format."""
     output_format = _choose_output_format(request.output_format or "png", None)
@@ -2343,7 +2345,7 @@ def _build_image_generation_response(
             b64_json=encode_image_base64_with_compression(
                 image, format=output_format, output_compression=request.output_compression
             ),
-            revised_prompt=None,
+            revised_prompt=revised_prompt,
         )
         for image in images
     ]
@@ -2595,6 +2597,7 @@ async def generate_images(
                 stage_durations=stage_durations,
                 peak_memory_mb=peak_memory_mb,
                 response_metrics=response_metrics,
+                revised_prompt=_extract_revised_prompt_from_result(result),
             )
         )
 

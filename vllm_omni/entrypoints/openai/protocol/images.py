@@ -210,7 +210,9 @@ class ImageData(BaseModel):
 
     b64_json: str | None = Field(default=None, description="Base64-encoded PNG image")
     url: str | None = Field(default=None, description="Image URL (not implemented)")
-    revised_prompt: str | None = Field(default=None, description="Revised prompt (OpenAI compatibility, always null)")
+    revised_prompt: str | None = Field(
+        default=None, description="Prompt the model rewrote the request into (e.g. GLM-Image2 thinking), else null"
+    )
 
 
 class ImageGenerationResponse(BaseModel):

@@ -275,6 +275,12 @@ class StageConfigFactory:
                         class_name,
                     )
                     return pipeline_cfg.model_type
+                from vllm_omni.diffusion.registry import _DIFFUSION_MODELS
+
+                if class_name in _DIFFUSION_MODELS:
+                    # A registered single-stage diffusion pipeline: skip the basename
+                    # fallback, which would map e.g. "GLM-Image-2" to "glm_image".
+                    return None
         except Exception as e:
             logger.debug(f"Failed to detect model type for diffusers-style models: {e}")
 

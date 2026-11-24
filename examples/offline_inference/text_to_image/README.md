@@ -4,6 +4,8 @@ Generate images from text prompts using vLLM-Omni's diffusion pipeline entrypoin
 
 - `text_to_image.py`: command-line script for single image generation with advanced options.
 - `gradio_demo.py`: lightweight Gradio UI for interactive prompt/seed/CFG exploration.
+- `glm_image2.py`: GLM-Image2 text-to-image with optional reference images (`--image`) and thinking mode
+  (`--enable-thinking`; over HTTP, send `"extra_params": {"enable_thinking": true}` and read `data[0].revised_prompt`).
 
 ## Table of Contents
 
