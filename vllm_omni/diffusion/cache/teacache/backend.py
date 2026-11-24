@@ -290,15 +290,20 @@ class TeaCacheBackend(CacheBackend):
                                 Currently not used by TeaCache but accepted for interface consistency.
             verbose: Whether to log refresh operations (default: True)
         """
-        # HunyuanImage3: tea cache state is managed inside the denoising loop,
-        # so refresh is a no-op (state is re-initialized every __call__).
+        # These pipelines manage TeaCache inside the denoising loop, so refresh
+        # is a no-op (state is re-initialized every __call__).
+        loop_managed_pipelines = ("GlmImage2Pipeline", "HunyuanImage3Pipeline")
         if (
             hasattr(pipeline, "_tea_cache_config")
             and isinstance(pipeline._tea_cache_config, TeaCacheConfig)
-            and pipeline.__class__.__name__ == "HunyuanImage3Pipeline"
+            and pipeline.__class__.__name__ in loop_managed_pipelines
         ):
             if verbose:
-                logger.debug(f"TeaCache state refreshed for HunyuanImage3 (num_inference_steps={num_inference_steps})")
+                logger.debug(
+                    "TeaCache state refreshed for %s (num_inference_steps=%s)",
+                    pipeline.__class__.__name__,
+                    num_inference_steps,
+                )
             return
 
         # Extract transformer from pipeline

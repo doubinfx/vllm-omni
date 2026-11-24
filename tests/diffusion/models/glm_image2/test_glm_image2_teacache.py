@@ -7,8 +7,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_omni.diffusion.cache.teacache.backend import CUSTOM_TEACACHE_ENABLERS
-from vllm_omni.diffusion.cache.teacache.config import _MODEL_COEFFICIENTS
+from vllm_omni.diffusion.cache.teacache.backend import (
+    CUSTOM_TEACACHE_ENABLERS,
+    TeaCacheBackend,
+)
+from vllm_omni.diffusion.cache.teacache.config import (
+    _MODEL_COEFFICIENTS,
+    TeaCacheConfig,
+)
+from vllm_omni.diffusion.data import DiffusionCacheConfig
 from vllm_omni.diffusion.models.glm_image2.glm_image2_transformer import GlmImage2TeaCacheState
 
 pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.cpu]
@@ -44,3 +51,17 @@ def test_glm_image2_teacache_is_registered():
     CUSTOM_TEACACHE_ENABLERS["GlmImage2Pipeline"](pipeline, SimpleNamespace(rel_l1_thresh=0.1, coefficients=None))
     assert pipeline._tea_cache_config.rel_l1_thresh == 0.1
     assert pipeline._tea_cache_config.coefficients == _MODEL_COEFFICIENTS["GlmImage2Pipeline"]
+
+
+def test_refresh_accepts_loop_managed_glm_image2_state():
+    class GlmImage2Pipeline:
+        pass
+
+    pipeline = GlmImage2Pipeline()
+    pipeline._tea_cache_config = TeaCacheConfig(
+        transformer_type="GlmImage2Pipeline",
+        rel_l1_thresh=0.2,
+    )
+    backend = TeaCacheBackend(DiffusionCacheConfig(rel_l1_thresh=0.2))
+
+    backend.refresh(pipeline, num_inference_steps=4)
