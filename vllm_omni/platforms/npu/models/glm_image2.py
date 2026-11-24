@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import MethodType, ModuleType
 
 import torch
@@ -328,6 +329,62 @@ def _install_exact_a2_rms_norm_patch(model) -> None:
         module._a2_exact_rms_norm = True
 
 
+def _a2_row_parallel_forward(self, input_):
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    eligible = (
+        input_.device.type == "npu"
+        and input_.dtype == torch.bfloat16
+        and self.weight.dtype == torch.bfloat16
+        and self.weight.ndim == 2
+        and input_.is_contiguous()
+        and self.input_is_parallel
+        and self.reduce_results
+        and self.bias is None
+        and isinstance(self.quant_method, UnquantizedLinearMethod)
+        and not torch.compiler.is_compiling()
+    )
+    if not eligible:
+        return self._a2_mm_all_reduce_fallback(input_)
+    output = _get_torch_npu().npu_mm_all_reduce_base(
+        input_,
+        self.weight.T,
+        self._a2_hcom,
+    )
+    return output, None
+
+
+def _install_a2_mm_all_reduce_patch(model) -> int:
+    from vllm.distributed import get_tp_group
+    from vllm.model_executor.layers.linear import (
+        RowParallelLinear,
+        UnquantizedLinearMethod,
+    )
+
+    tp_group = get_tp_group()
+    if tp_group.world_size <= 1:
+        return 0
+    backend = tp_group.device_group._get_backend(torch.device("npu"))
+    hcom = backend.get_hccl_comm_name(tp_group.rank_in_group)
+    patched = 0
+    for module in model.modules():
+        if not isinstance(module, RowParallelLinear):
+            continue
+        if (
+            module.weight.dtype != torch.bfloat16
+            or not module.input_is_parallel
+            or not module.reduce_results
+            or module.bias is not None
+            or not isinstance(module.quant_method, UnquantizedLinearMethod)
+        ):
+            continue
+        module._a2_mm_all_reduce_fallback = module.forward
+        module._a2_hcom = hcom
+        module.forward = MethodType(_a2_row_parallel_forward, module)
+        patched += 1
+    return patched
+
+
 def apply_glm_image2_npu_patches(model, od_config) -> bool:
     """Install A2 execution paths without changing official model code."""
     from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -343,5 +400,11 @@ def apply_glm_image2_npu_patches(model, od_config) -> bool:
     _install_a2_rotary_patches()
     _install_a2_attention_patch()
     _install_exact_a2_rms_norm_patch(model)
+    patched_row_parallel = _install_a2_mm_all_reduce_patch(model)
+    if patched_row_parallel:
+        logging.getLogger(__name__).info(
+            "Patched %d GLM-Image2 A2 row-parallel projections with MM+AllReduce",
+            patched_row_parallel,
+        )
     del od_config
     return True
