@@ -380,7 +380,9 @@ class GlmImage2Attention(nn.Module):
 
         compressed_kv, _ = self.kv_a_proj_with_mqa(hidden_states)
         kv_latent, k_rot = compressed_kv.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_latent = self.kv_a_layernorm(kv_latent.contiguous())
+        # RMSNorm's FP32 conversion materializes the strided latent. Avoid an
+        # extra BF16 copy before the reduction on NPU.
+        kv_latent = self.kv_a_layernorm(kv_latent)
         kv, _ = self.kv_b_proj(kv_latent)
         return query, kv_latent, kv.view(num_tokens, self.num_heads, nope + self.v_head_dim), k_rot, fused
 
