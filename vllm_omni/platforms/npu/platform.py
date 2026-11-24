@@ -256,7 +256,11 @@ class NPUOmniPlatform(OmniPlatform, NPUPlatform):
     @classmethod
     def apply_diffusion_model_patches(cls, model, od_config) -> None:
         from vllm_omni.platforms.npu.models.minimax_h3_image import apply_minimax_h3_image_graphs
+        from vllm_omni.platforms.npu.models.glm_image2 import (
+            apply_glm_image2_npu_patches,
+        )
 
+        apply_glm_image2_npu_patches(model, od_config)
         apply_minimax_h3_image_graphs(model, od_config)
 
     @classmethod
