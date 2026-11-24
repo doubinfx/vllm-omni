@@ -145,6 +145,22 @@ def a2_moe_router_forward(
     return router_logits, topk_weights, topk_indices
 
 
+def prepare_a2_rotary_tables(
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    interleaved: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Prepare RoPE tables once for reuse by every attention layer."""
+    if not interleaved:
+        return cos, sin
+    half = cos.shape[-1] // 2
+    return (
+        cos[..., :half].repeat_interleave(2, dim=-1),
+        sin[..., :half].repeat_interleave(2, dim=-1),
+    )
+
+
 def _apply_rotary(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
@@ -170,10 +186,6 @@ def _apply_rotary(
     output_dtype = hidden_states.dtype
     cos = cos.to(hidden_states.device)
     sin = sin.to(hidden_states.device)
-    if interleaved:
-        half = cos.shape[-1] // 2
-        cos = cos[..., :half].repeat_interleave(2, dim=-1)
-        sin = sin[..., :half].repeat_interleave(2, dim=-1)
     rotary_dtype = cos.dtype
     return npu.npu_rotary_mul(
         hidden_states.to(rotary_dtype),
@@ -280,6 +292,7 @@ __all__ = [
     "a2_moe_forward",
     "a2_moe_router_forward",
     "a2_rms_norm_forward",
+    "prepare_a2_rotary_tables",
     "registered_a2_fa_vendor",
     "use_a2_fused_attention",
     "use_a2_fused_moe",

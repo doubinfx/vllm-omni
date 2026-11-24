@@ -199,6 +199,28 @@ def test_a2_rotary_preserves_cos_dtype_without_fp32_cast(monkeypatch):
     ]
 
 
+def test_prepare_a2_rotary_tables_repeats_interleaved_frequencies():
+    cos = torch.tensor([[[0.0, 1.0, 2.0, 3.0]]])
+    sin = torch.tensor([[[4.0, 5.0, 6.0, 7.0]]])
+
+    prepared_cos, prepared_sin = a2_kernels.prepare_a2_rotary_tables(
+        cos,
+        sin,
+        interleaved=True,
+    )
+
+    assert prepared_cos.tolist() == [[[0.0, 0.0, 1.0, 1.0]]]
+    assert prepared_sin.tolist() == [[[4.0, 4.0, 5.0, 5.0]]]
+
+    same_cos, same_sin = a2_kernels.prepare_a2_rotary_tables(
+        cos,
+        sin,
+        interleaved=False,
+    )
+    assert same_cos is cos
+    assert same_sin is sin
+
+
 def test_a2_rms_norm_uses_native_operator(monkeypatch):
     calls = []
 

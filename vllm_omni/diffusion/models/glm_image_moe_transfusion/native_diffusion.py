@@ -31,6 +31,7 @@ from vllm_omni.diffusion.models.glm_image_moe_transfusion.a2_kernels import (
     a2_attention_forward,
     a2_moe_forward,
     a2_rms_norm_forward,
+    prepare_a2_rotary_tables,
     use_a2_fused_attention,
     use_a2_fused_moe,
     use_a2_fused_rms_norm,
@@ -557,6 +558,12 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         ]
         cos = torch.stack([table[0].squeeze(0) for table in rope_tables])
         sin = torch.stack([table[1].squeeze(0) for table in rope_tables])
+        if self.fused_attention and self.config.rope_interleave:
+            cos, sin = prepare_a2_rotary_tables(
+                cos,
+                sin,
+                interleaved=True,
+            )
         cos = cos.to(hidden_states.dtype)
         sin = sin.to(hidden_states.dtype)
         attention_mask = _packed_attention_mask_batch(
