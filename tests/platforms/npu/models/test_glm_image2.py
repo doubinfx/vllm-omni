@@ -169,3 +169,21 @@ def test_exact_a2_rms_norm_matches_vllm_ir(hidden_size, rows):
     assert torch.equal(actual, expected)
     assert torch.equal(actual_add, expected_add)
     assert torch.equal(actual_residual, expected_residual)
+
+
+def test_deferred_moe_reduction_preserves_and_truncates_output():
+    states = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+
+    assert glm_image2._defer_a2_moe_final_reduce(
+        object(),
+        states,
+        None,
+    ) is states
+    torch.testing.assert_close(
+        glm_image2._defer_a2_moe_final_reduce(
+            object(),
+            states,
+            2,
+        ),
+        states[..., :2],
+    )

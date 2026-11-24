@@ -385,6 +385,101 @@ def _install_a2_mm_all_reduce_patch(model) -> int:
     return patched
 
 
+def _a2_moe_forward(self, hidden_states: torch.Tensor, num_branches: int = 1):
+    """Combine routed and shared expert partial outputs in one collective."""
+    from vllm.distributed import tensor_model_parallel_all_reduce
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    if num_branches == 1:
+        router_logits, _ = self.gate(hidden_states)
+    else:
+        # Preserve the official branch-wise routing path. The FP32 router GEMM
+        # is not row-invariant in M and may otherwise flip near-tied experts.
+        router_logits = torch.cat(
+            [self.gate(chunk)[0] for chunk in hidden_states.chunk(num_branches)]
+        )
+
+    routed = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+    shared_experts = self.shared_experts
+    down_proj = shared_experts.down_proj
+    gate_up, _ = shared_experts.gate_up_proj(hidden_states)
+    shared_input = shared_experts.act_fn(gate_up)
+    eligible = (
+        routed.device.type == "npu"
+        and routed.dtype == torch.bfloat16
+        and shared_input.dtype == torch.bfloat16
+        and shared_input.is_contiguous()
+        and down_proj.weight.dtype == torch.bfloat16
+        and down_proj.weight.ndim == 2
+        and down_proj.bias is None
+        and isinstance(down_proj.quant_method, UnquantizedLinearMethod)
+        and routed.shape == (*shared_input.shape[:-1], down_proj.weight.shape[0])
+        and not torch.compiler.is_compiling()
+    )
+    if not eligible:
+        # Routed output is intentionally unreduced. Fall back to reducing the
+        # shared branch separately so the mathematical result stays correct.
+        return routed + shared_experts(hidden_states)
+    shared_partial = F.linear(
+        shared_input,
+        down_proj.weight,
+        down_proj.bias,
+    )
+    return tensor_model_parallel_all_reduce(shared_partial + routed)
+
+
+def _defer_a2_moe_final_reduce(
+    self,
+    states: torch.Tensor,
+    trunc_size: int | None,
+    output_is_reduced: bool | None = None,
+):
+    """Honor the runner's deferred-reduction mode on the Ascend runner."""
+    del self, output_is_reduced
+    if trunc_size is not None and trunc_size > 0:
+        return states[..., :trunc_size]
+    return states
+
+
+def _install_a2_moe_combined_all_reduce_patch(model) -> int:
+    """Defer routed reduction and combine both expert branches before one AR."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm_omni.diffusion.models.glm_image2.glm_image2_transformer import (
+        GlmImage2MoE,
+    )
+
+    from vllm.distributed import get_tp_group
+
+    tp_group = get_tp_group()
+    if tp_group.world_size <= 1:
+        return 0
+    patched = 0
+    for module in model.modules():
+        if not isinstance(module, GlmImage2MoE):
+            continue
+        moe_config = getattr(module.experts, "moe_config", None)
+        down_proj = module.shared_experts.down_proj
+        if (
+            moe_config is None
+            or down_proj.weight.dtype != torch.bfloat16
+            or down_proj.bias is not None
+            or not isinstance(down_proj.quant_method, UnquantizedLinearMethod)
+        ):
+            continue
+        # The runner supports deferring its final reduction for downstream
+        # fusion. The Ascend runner currently ignores the static skip flag, so
+        # override the per-layer hook as well. Shared-expert down remains an
+        # unquantized BF16 RowParallel.
+        moe_config.skip_final_all_reduce = True
+        module.experts._maybe_reduce_final_output = MethodType(
+            _defer_a2_moe_final_reduce,
+            module.experts,
+        )
+        module.forward = MethodType(_a2_moe_forward, module)
+        patched += 1
+    return patched
+
+
 def apply_glm_image2_npu_patches(model, od_config) -> bool:
     """Install A2 execution paths without changing official model code."""
     from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -401,10 +496,16 @@ def apply_glm_image2_npu_patches(model, od_config) -> bool:
     _install_a2_attention_patch()
     _install_exact_a2_rms_norm_patch(model)
     patched_row_parallel = _install_a2_mm_all_reduce_patch(model)
+    patched_moe = _install_a2_moe_combined_all_reduce_patch(model)
     if patched_row_parallel:
         logging.getLogger(__name__).info(
             "Patched %d GLM-Image2 A2 row-parallel projections with MM+AllReduce",
             patched_row_parallel,
+        )
+    if patched_moe:
+        logging.getLogger(__name__).info(
+            "Patched %d GLM-Image2 A2 MoE layers with combined expert AllReduce",
+            patched_moe,
         )
     del od_config
     return True
