@@ -129,6 +129,9 @@ def _install_a2_rotary_patches() -> None:
     original_rotary = glm_image2_transformer.GlmImage2RotaryEmbedding.forward
     original_apply = glm_image2_transformer.apply_rotary_interleave
     original_query = glm_image2_transformer.apply_query_rotary
+    cached_query_source: torch.Tensor | None = None
+    cached_query_dim: int | None = None
+    cached_query_tables: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def rotary_forward(self, position_ids):
         cos, sin = original_rotary(self, position_ids)
@@ -144,13 +147,19 @@ def _install_a2_rotary_patches() -> None:
         return _apply_npu_rotary_interleave(hidden_states, cos, sin)
 
     def apply_query_rotary(query, rope_offset, cos, sin):
+        nonlocal cached_query_source, cached_query_dim, cached_query_tables
         if query.device.type != "npu":
             return original_query(query, rope_offset, cos, sin)
-        query_cos, query_sin = _pad_query_rotary_tables(
-            cos,
-            sin,
-            query.shape[-1],
-        )
+        if cached_query_source is not cos or cached_query_dim != query.shape[-1]:
+            cached_query_source = cos
+            cached_query_dim = query.shape[-1]
+            cached_query_tables = _pad_query_rotary_tables(
+                cos,
+                sin,
+                query.shape[-1],
+            )
+        assert cached_query_tables is not None
+        query_cos, query_sin = cached_query_tables
         return _apply_npu_rotary_interleave(
             query,
             query_cos,
