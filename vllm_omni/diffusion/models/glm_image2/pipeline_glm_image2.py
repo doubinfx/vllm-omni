@@ -146,6 +146,18 @@ def get_glm_image2_post_process_func(od_config: OmniDiffusionConfig):
     """Convert decoded images in [-1, 1] to PIL; thinking outputs keep their text metadata."""
 
     def to_pil(images: torch.Tensor) -> list[PIL.Image.Image]:
+        if images.device.type == "npu":
+            arrays = (
+                (images / 2 + 0.5)
+                .clamp(0, 1)
+                .mul(255)
+                .round()
+                .to(torch.uint8)
+                .permute(0, 2, 3, 1)
+                .cpu()
+                .numpy()
+            )
+            return [PIL.Image.fromarray(array) for array in arrays]
         arrays = (images / 2 + 0.5).clamp(0, 1).cpu().permute(0, 2, 3, 1).float().numpy()
         return [PIL.Image.fromarray(array) for array in (arrays * 255).round().astype("uint8")]
 

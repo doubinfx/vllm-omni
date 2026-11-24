@@ -5,6 +5,7 @@
 import re
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -168,6 +169,26 @@ def test_post_process_keeps_the_thinking_text():
     output = post_process({"payload": {"image": image}, "metadata": metadata})
     assert output["metadata"] == metadata
     assert [item.size for item in output["payload"]["image"]] == [(4, 4)]
+
+
+@pytest.mark.skipif(
+    not torch.npu.is_available(),
+    reason="requires an Ascend NPU",
+)
+def test_npu_post_process_matches_float_transfer_path():
+    post_process = get_glm_image2_post_process_func(None)
+    torch.manual_seed(2026)
+    image = torch.rand(2, 3, 32, 32, dtype=torch.float32) * 2 - 1
+    device_image = image.to("npu")
+    expected = (
+        (image / 2 + 0.5)
+        .clamp(0, 1)
+        .permute(0, 2, 3, 1)
+        .numpy()
+        * 255
+    ).round().astype("uint8")
+    actual = np.asarray(post_process(device_image)[0])
+    assert np.array_equal(actual, expected[0])
 
 
 @pytest.mark.parametrize("guidance_scale, prompt_format", [(4.0, "plain"), (1.0, "calico_structure")])
