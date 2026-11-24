@@ -1302,6 +1302,16 @@ class OmniDiffusionConfig:
     @property
     def is_moe(self) -> bool:
         num_experts = self.tf_model_config.get("num_experts", None)
+        if num_experts is None:
+            text_config = self.tf_model_config.get("text_config")
+            if isinstance(text_config, dict):
+                num_experts = text_config.get("n_routed_experts")
+        if num_experts is None:
+            architectures = self.tf_model_config.get("architectures", ())
+            if any("GlmImage2" in str(name) for name in architectures):
+                return True
+        if num_experts is None and self.model_class_name == "GlmImage2Pipeline":
+            return True
         if not isinstance(num_experts, (list, tuple, int)):
             return False
         if isinstance(num_experts, int):

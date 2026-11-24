@@ -76,3 +76,25 @@ class TestOmniDiffusionConfigIsMoE:
         tf_config = TransformerConfig.from_dict({"num_experts": ["a", 0.0]})
         config = OmniDiffusionConfig(model="test", tf_model_config=tf_config)
         assert config.is_moe is False
+
+    def test_is_moe_nested_text_config_routed_experts(self):
+        """Models such as GLM-Image2 store the routed expert count in text_config."""
+        tf_config = TransformerConfig.from_dict(
+            {"text_config": {"n_routed_experts": 64}}
+        )
+        config = OmniDiffusionConfig(model="test", tf_model_config=tf_config)
+        assert config.is_moe is True
+
+    def test_is_moe_glm_image2_architecture(self):
+        tf_config = TransformerConfig.from_dict(
+            {"architectures": ["GlmImage2ForConditionalGeneration"]}
+        )
+        config = OmniDiffusionConfig(model="test", tf_model_config=tf_config)
+        assert config.is_moe is True
+
+    def test_is_moe_glm_image2_pipeline_name(self):
+        config = OmniDiffusionConfig(
+            model="test",
+            model_class_name="GlmImage2Pipeline",
+        )
+        assert config.is_moe is True
