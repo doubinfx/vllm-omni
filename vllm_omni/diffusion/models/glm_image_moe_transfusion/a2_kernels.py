@@ -96,7 +96,7 @@ def use_a2_fused_moe() -> bool:
         for op in (
             "npu_grouped_matmul",
             "npu_moe_gating_top_k",
-            "npu_moe_token_permute",
+            "npu_moe_init_routing_v2",
             "npu_moe_token_unpermute",
             "npu_swiglu",
         )
@@ -143,6 +143,29 @@ def a2_moe_router_forward(
         routed_scaling_factor=float(router.routed_scaling_factor),
     )
     return router_logits, topk_weights, topk_indices
+
+
+def a2_moe_init_routing(
+    hidden_states: torch.Tensor,
+    top_k_indices: torch.Tensor,
+    *,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Expand, sort, and count routed tokens with one A2 operator."""
+    expanded, row_ids, expert_counts, _ = _get_npu().npu_moe_init_routing_v2(
+        hidden_states,
+        top_k_indices.to(torch.int32),
+        active_num=-1,
+        expert_capacity=-1,
+        expert_num=num_experts,
+        drop_pad_mode=0,
+        expert_tokens_num_type=1,
+        expert_tokens_num_flag=True,
+        quant_mode=-1,
+        active_expert_range=[0, num_experts],
+        row_idx_type=0,
+    )
+    return expanded, row_ids, expert_counts
 
 
 def prepare_a2_rotary_tables(
@@ -254,13 +277,11 @@ def a2_moe_forward(mlp: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
     flattened = hidden_states.reshape(-1, hidden_states.shape[-1])
     experts = mlp.experts
 
-    permuted, row_ids = npu.npu_moe_token_permute(flattened, top_k_indices.to(torch.int32))
-    tokens_per_expert = torch.histc(
+    permuted, row_ids, tokens_per_expert = a2_moe_init_routing(
+        flattened,
         top_k_indices,
-        bins=experts.num_experts,
-        min=0,
-        max=experts.num_experts,
-    ).to(torch.int64)
+        num_experts=experts.num_experts,
+    )
     gate_up = npu.npu_grouped_matmul(
         [permuted],
         [experts.gate_up_proj.transpose(1, 2)],
@@ -290,6 +311,7 @@ __all__ = [
     "A2_FA_VENDOR_ENV",
     "a2_attention_forward",
     "a2_moe_forward",
+    "a2_moe_init_routing",
     "a2_moe_router_forward",
     "a2_rms_norm_forward",
     "prepare_a2_rotary_tables",

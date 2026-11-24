@@ -282,6 +282,47 @@ def test_a2_moe_router_uses_fused_gating(monkeypatch):
     assert calls[0][2]["routed_scaling_factor"] == 1.8
 
 
+def test_a2_moe_init_routing_uses_native_operator(monkeypatch):
+    calls = []
+    counts = torch.tensor([1, 2], dtype=torch.int64)
+
+    def init_routing(hidden, indices, **kwargs):
+        calls.append((hidden, indices, kwargs))
+        return hidden, torch.tensor([0, 1, 2]), counts, torch.empty(0)
+
+    monkeypatch.setattr(
+        a2_kernels,
+        "_get_npu",
+        lambda: SimpleNamespace(npu_moe_init_routing_v2=init_routing),
+    )
+    hidden = torch.randn((4, 8), dtype=torch.bfloat16)
+    indices = torch.tensor(
+        [[0, 1], [1, 1], [0, 0], [1, 0]],
+        dtype=torch.int32,
+    )
+
+    expanded, row_ids, expert_counts = a2_kernels.a2_moe_init_routing(
+        hidden,
+        indices,
+        num_experts=2,
+    )
+
+    assert expanded is hidden
+    assert torch.equal(row_ids, torch.tensor([0, 1, 2]))
+    assert expert_counts is counts
+    assert calls[0][2] == {
+        "active_num": -1,
+        "expert_capacity": -1,
+        "expert_num": 2,
+        "drop_pad_mode": 0,
+        "expert_tokens_num_type": 1,
+        "expert_tokens_num_flag": True,
+        "quant_mode": -1,
+        "active_expert_range": [0, 2],
+        "row_idx_type": 0,
+    }
+
+
 def test_select_mrope_returns_single_request_tables():
     position_ids = torch.zeros((3, 7), dtype=torch.long)
     image_mask = torch.zeros((7,), dtype=torch.bool)
