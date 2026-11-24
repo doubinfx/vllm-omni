@@ -4,11 +4,64 @@
 
 from __future__ import annotations
 
-from types import ModuleType
+from types import MethodType, ModuleType
 
 import torch
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _A2_ROTARY_PATCHED = False
+_A2_RMS_NORM_CHUNK = 32
+
+
+if HAS_TRITON:
+
+    @triton.jit
+    def _exact_add_rms_norm_kernel(
+        x_ptr,
+        residual_ptr,
+        weight_ptr,
+        output_ptr,
+        residual_output_ptr,
+        num_cols: tl.constexpr,
+        eps: tl.constexpr,
+        block_cols: tl.constexpr,
+        has_residual: tl.constexpr,
+        reduction_groups: tl.constexpr,
+    ):
+        """Match vLLM's native RMSNorm dtype and rounding boundaries exactly."""
+        row = tl.program_id(0)
+        cols = tl.arange(0, block_cols)
+        mask = cols < num_cols
+        x = tl.load(x_ptr + row * num_cols + cols, mask, other=0.0)
+        if has_residual:
+            residual = tl.load(
+                residual_ptr + row * num_cols + cols,
+                mask,
+                other=0.0,
+            )
+            value_fp32 = x.to(tl.float32) + residual.to(tl.float32)
+            tl.store(
+                residual_output_ptr + row * num_cols + cols,
+                value_fp32.to(tl.bfloat16),
+                mask,
+            )
+        else:
+            value_fp32 = x.to(tl.float32)
+
+        squares = tl.reshape(
+            value_fp32 * value_fp32,
+            (reduction_groups, block_cols // reduction_groups),
+        )
+        variance = tl.sum(tl.sum(squares, axis=1), axis=0) / num_cols
+        normalized = value_fp32 * tl.rsqrt(variance + eps)
+        weight = tl.load(weight_ptr + cols, mask, other=0.0)
+        # vLLM casts the normalized value back to the weight dtype before the
+        # weighted multiply. Preserve that intermediate BF16 rounding.
+        tl.store(
+            output_ptr + row * num_cols + cols,
+            normalized.to(tl.bfloat16) * weight,
+            mask,
+        )
 
 
 def _get_torch_npu() -> ModuleType:
@@ -145,6 +198,59 @@ def _install_a2_attention_patch() -> None:
     FlashAttentionImpl.forward_fa_npu = forward_fa_npu
 
 
+def _apply_exact_a2_rms_norm(
+    module,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Fuse small-row RMSNorm while preserving vLLM's exact BF16 rounding."""
+    eligible = (
+        HAS_TRITON
+        and hidden_states.device.type == "npu"
+        and hidden_states.dtype == torch.bfloat16
+        and module.weight.dtype == torch.bfloat16
+        and hidden_states.ndim == 2
+        and hidden_states.shape[0] <= 64
+        and hidden_states.is_contiguous()
+        and not torch.compiler.is_compiling()
+    )
+    if not eligible:
+        return module._a2_rms_norm_fallback(hidden_states, residual)
+
+    output = torch.empty_like(hidden_states)
+    residual_output = torch.empty_like(hidden_states) if residual is not None else hidden_states
+    num_cols = hidden_states.shape[1]
+    _exact_add_rms_norm_kernel[(hidden_states.shape[0],)](
+        hidden_states,
+        residual if residual is not None else hidden_states,
+        module.weight,
+        output,
+        residual_output,
+        num_cols,
+        module.variance_epsilon,
+        triton.next_power_of_2(num_cols),
+        residual is not None,
+        _A2_RMS_NORM_CHUNK,
+        enable_fp_fusion=False,
+    )
+    if residual is not None:
+        return output, residual_output
+    return output
+
+
+def _install_exact_a2_rms_norm_patch(model) -> None:
+    from vllm.model_executor.layers.layernorm import RMSNorm
+
+    for module in model.modules():
+        if not isinstance(module, RMSNorm):
+            continue
+        if getattr(module, "_a2_exact_rms_norm", False):
+            continue
+        module._a2_rms_norm_fallback = module._forward_method
+        module._forward_method = MethodType(_apply_exact_a2_rms_norm, module)
+        module._a2_exact_rms_norm = True
+
+
 def apply_glm_image2_npu_patches(model, od_config) -> bool:
     """Install A2 execution paths without changing official model code."""
     from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -159,5 +265,6 @@ def apply_glm_image2_npu_patches(model, od_config) -> bool:
         return False
     _install_a2_rotary_patches()
     _install_a2_attention_patch()
+    _install_exact_a2_rms_norm_patch(model)
     del od_config
     return True

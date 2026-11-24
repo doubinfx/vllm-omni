@@ -3,9 +3,18 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm_omni.platforms.npu.models import glm_image2
+
+
+def _npu_available() -> bool:
+    try:
+        import torch_npu  # noqa: F401
+    except ImportError:
+        return False
+    return torch.npu.is_available()
 
 
 def test_repeat_rotary_tables_interleaves_frequency_pairs():
@@ -89,3 +98,43 @@ def test_a2_dense_attention_uses_native_fusion(monkeypatch):
     assert kwargs["input_layout"] == "BSND"
     assert kwargs["sparse_mode"] == 1
     assert torch.equal(kwargs["atten_mask"], ~keep_mask)
+
+
+@pytest.mark.skipif(
+    not _npu_available(),
+    reason="requires an Ascend NPU",
+)
+@pytest.mark.parametrize(
+    ("hidden_size", "rows"),
+    [(512, 1), (768, 1), (2048, 1), (2048, 64)],
+)
+def test_exact_a2_rms_norm_matches_vllm_ir(hidden_size, rows):
+    from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.layernorm import RMSNorm
+
+    with set_current_vllm_config(
+        VllmConfig(device_config=DeviceConfig(device="npu"))
+    ):
+        module = RMSNorm(hidden_size, eps=1e-6)
+    module.to("npu")
+    module.weight.data = module.weight.data.to(torch.bfloat16)
+    torch.manual_seed(2026 + hidden_size + rows)
+    hidden = torch.randn(rows, hidden_size, dtype=torch.bfloat16, device="npu")
+    residual = torch.randn_like(hidden)
+
+    expected = module.forward_native(hidden)
+    expected_add, expected_residual = module.forward_native(
+        hidden,
+        residual.clone(),
+    )
+    module._a2_rms_norm_fallback = module.forward_native
+    actual = glm_image2._apply_exact_a2_rms_norm(module, hidden)
+    actual_add, actual_residual = glm_image2._apply_exact_a2_rms_norm(
+        module,
+        hidden,
+        residual.clone(),
+    )
+
+    assert torch.equal(actual, expected)
+    assert torch.equal(actual_add, expected_add)
+    assert torch.equal(actual_residual, expected_residual)
