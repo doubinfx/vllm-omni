@@ -27,6 +27,26 @@ def test_repeat_rotary_tables_interleaves_frequency_pairs():
     assert expanded_sin.tolist() == [[4.0, 4.0, 5.0, 5.0, 6.0, 6.0, 7.0, 7.0]]
 
 
+def test_pad_query_rotary_tables_uses_identity_for_leading_pairs():
+    cos = torch.tensor([[0.5, 0.25]])
+    sin = torch.tensor([[0.1, 0.2]])
+
+    padded_cos, padded_sin = glm_image2._pad_query_rotary_tables(
+        cos,
+        sin,
+        6,
+    )
+
+    torch.testing.assert_close(
+        padded_cos,
+        torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.5, 0.25]]),
+    )
+    torch.testing.assert_close(
+        padded_sin,
+        torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.1, 0.2]]),
+    )
+
+
 def test_npu_rotary_input_uses_bsnd_layout(monkeypatch):
     calls = []
 

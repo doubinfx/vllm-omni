@@ -87,6 +87,23 @@ def _repeat_rotary_tables(
     )
 
 
+def _pad_query_rotary_tables(
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    target_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad leading non-rotary pairs with an identity transform."""
+    padding = target_dim - cos.shape[-1]
+    if padding < 0:
+        raise ValueError("rotary table is wider than the query embedding")
+    if padding == 0:
+        return cos, sin
+    return (
+        torch.cat((cos.new_ones(*cos.shape[:-1], padding), cos), dim=-1),
+        torch.cat((sin.new_zeros(*sin.shape[:-1], padding), sin), dim=-1),
+    )
+
+
 def _apply_npu_rotary_interleave(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
@@ -111,6 +128,7 @@ def _install_a2_rotary_patches() -> None:
 
     original_rotary = glm_image2_transformer.GlmImage2RotaryEmbedding.forward
     original_apply = glm_image2_transformer.apply_rotary_interleave
+    original_query = glm_image2_transformer.apply_query_rotary
 
     def rotary_forward(self, position_ids):
         cos, sin = original_rotary(self, position_ids)
@@ -125,8 +143,23 @@ def _install_a2_rotary_patches() -> None:
             cos, sin = _repeat_rotary_tables(cos, sin)
         return _apply_npu_rotary_interleave(hidden_states, cos, sin)
 
+    def apply_query_rotary(query, rope_offset, cos, sin):
+        if query.device.type != "npu":
+            return original_query(query, rope_offset, cos, sin)
+        query_cos, query_sin = _pad_query_rotary_tables(
+            cos,
+            sin,
+            query.shape[-1],
+        )
+        return _apply_npu_rotary_interleave(
+            query,
+            query_cos,
+            query_sin,
+        )
+
     glm_image2_transformer.GlmImage2RotaryEmbedding.forward = rotary_forward
     glm_image2_transformer.apply_rotary_interleave = apply_rotary_interleave
+    glm_image2_transformer.apply_query_rotary = apply_query_rotary
     _A2_ROTARY_PATCHED = True
 
 

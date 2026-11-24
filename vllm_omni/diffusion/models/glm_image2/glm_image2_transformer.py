@@ -229,6 +229,21 @@ def apply_rotary_interleave(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tenso
     return torch.stack((even * cos - odd * sin, odd * cos + even * sin), dim=-1).flatten(-2).to(x.dtype)
 
 
+def apply_query_rotary(
+    query: torch.Tensor,
+    rope_offset: int,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """Rotate the trailing RoPE slice while preserving the query's leading dimensions."""
+    query[..., rope_offset:] = apply_rotary_interleave(
+        query[..., rope_offset:],
+        cos,
+        sin,
+    )
+    return query
+
+
 # ================================================================ attention
 
 
@@ -376,7 +391,7 @@ class GlmImage2Attention(nn.Module):
         if fused:
             query_rope_(query, nope, cos, sin)
         else:
-            query[..., nope:] = apply_rotary_interleave(query[..., nope:], cos, sin)
+            query = apply_query_rotary(query, nope, cos, sin)
 
         compressed_kv, _ = self.kv_a_proj_with_mqa(hidden_states)
         kv_latent, k_rot = compressed_kv.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
