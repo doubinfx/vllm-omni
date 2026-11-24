@@ -194,6 +194,43 @@ def test_a2_rms_norm_uses_native_operator(monkeypatch):
     assert calls == [(hidden, norm.weight, 1e-5)]
 
 
+def test_a2_moe_router_uses_fused_gating(monkeypatch):
+    calls = []
+
+    def gating_top_k(logits, k, **kwargs):
+        calls.append((logits, k, kwargs))
+        weights = torch.full((logits.shape[0], k), 0.25)
+        indices = torch.zeros((logits.shape[0], k), dtype=torch.int32)
+        return weights, indices, torch.empty(0)
+
+    monkeypatch.setattr(
+        a2_kernels,
+        "_get_npu",
+        lambda: SimpleNamespace(npu_moe_gating_top_k=gating_top_k),
+    )
+    router = SimpleNamespace(
+        hidden_dim=8,
+        top_k=4,
+        topk_group=1,
+        num_group=1,
+        routed_scaling_factor=1.8,
+        norm_topk_prob=True,
+        weight=torch.ones((16, 8)),
+        e_score_correction_bias=torch.zeros(16),
+    )
+    hidden = torch.randn((2, 3, 8))
+
+    logits, weights, indices = a2_kernels.a2_moe_router_forward(router, hidden)
+
+    assert logits.shape == (6, 16)
+    assert weights.shape == (6, 4)
+    assert indices.shape == (6, 4)
+    assert calls[0][1] == 4
+    assert calls[0][2]["group_select_mode"] == 1
+    assert calls[0][2]["norm_type"] == 1
+    assert calls[0][2]["routed_scaling_factor"] == 1.8
+
+
 def test_select_mrope_returns_single_request_tables():
     position_ids = torch.zeros((3, 7), dtype=torch.long)
     image_mask = torch.zeros((7,), dtype=torch.bool)

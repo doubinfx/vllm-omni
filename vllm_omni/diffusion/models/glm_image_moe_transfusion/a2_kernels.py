@@ -95,6 +95,7 @@ def use_a2_fused_moe() -> bool:
         hasattr(npu, op)
         for op in (
             "npu_grouped_matmul",
+            "npu_moe_gating_top_k",
             "npu_moe_token_permute",
             "npu_moe_token_unpermute",
             "npu_swiglu",
@@ -115,6 +116,33 @@ def a2_rms_norm_forward(norm: nn.Module, hidden_states: torch.Tensor) -> torch.T
         norm.weight,
         epsilon=float(norm.variance_epsilon),
     )[0]
+
+
+def a2_moe_router_forward(
+    router: nn.Module,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fuse GLM router sigmoid, grouped top-k, renorm, and scaling."""
+    if not router.norm_topk_prob:
+        return router(hidden_states)
+    hidden_states = hidden_states.view(-1, router.hidden_dim)
+    router_logits = torch.nn.functional.linear(
+        hidden_states.float(),
+        router.weight.float(),
+    )
+    topk_weights, topk_indices, _ = _get_npu().npu_moe_gating_top_k(
+        router_logits,
+        router.top_k,
+        bias=router.e_score_correction_bias,
+        k_group=router.topk_group,
+        group_count=router.num_group,
+        group_select_mode=1,
+        renorm=0,
+        norm_type=1,
+        out_flag=False,
+        routed_scaling_factor=float(router.routed_scaling_factor),
+    )
+    return router_logits, topk_weights, topk_indices
 
 
 def _apply_rotary(
@@ -209,7 +237,7 @@ def a2_moe_forward(mlp: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
     npu = _get_npu()
     residuals = hidden_states
     original_shape = hidden_states.shape
-    _, top_k_weights, top_k_indices = mlp.gate(hidden_states)
+    _, top_k_weights, top_k_indices = a2_moe_router_forward(mlp.gate, hidden_states)
     flattened = hidden_states.reshape(-1, hidden_states.shape[-1])
     experts = mlp.experts
 
@@ -219,7 +247,7 @@ def a2_moe_forward(mlp: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
         bins=experts.num_experts,
         min=0,
         max=experts.num_experts,
-    )
+    ).to(torch.int64)
     gate_up = npu.npu_grouped_matmul(
         [permuted],
         [experts.gate_up_proj.transpose(1, 2)],
@@ -249,6 +277,7 @@ __all__ = [
     "A2_FA_VENDOR_ENV",
     "a2_attention_forward",
     "a2_moe_forward",
+    "a2_moe_router_forward",
     "a2_rms_norm_forward",
     "registered_a2_fa_vendor",
     "use_a2_fused_attention",
