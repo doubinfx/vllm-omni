@@ -174,10 +174,11 @@ def _apply_rotary(
         half = cos.shape[-1] // 2
         cos = cos[..., :half].repeat_interleave(2, dim=-1)
         sin = sin[..., :half].repeat_interleave(2, dim=-1)
+    rotary_dtype = cos.dtype
     return npu.npu_rotary_mul(
-        hidden_states.float(),
-        cos.float().unsqueeze(2),
-        sin.float().unsqueeze(2),
+        hidden_states.to(rotary_dtype),
+        cos.unsqueeze(2),
+        sin.unsqueeze(2),
         rotary_mode="interleave" if interleaved else "half",
     ).to(output_dtype)
 

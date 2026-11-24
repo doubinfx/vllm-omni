@@ -170,6 +170,35 @@ def test_a2_rotary_splits_unsupported_batch_input(monkeypatch):
     assert all(shape[0] == 1 for shape, _, _, _ in calls)
 
 
+def test_a2_rotary_preserves_cos_dtype_without_fp32_cast(monkeypatch):
+    calls = []
+
+    def rotary(hidden, cos, sin, *, rotary_mode):
+        calls.append((hidden.dtype, cos.dtype, sin.dtype, rotary_mode))
+        return hidden
+
+    monkeypatch.setattr(
+        a2_kernels,
+        "_get_npu",
+        lambda: SimpleNamespace(npu_rotary_mul=rotary),
+    )
+    hidden = torch.randn((1, 3, 4, 8), dtype=torch.bfloat16)
+    cos = torch.randn((1, 3, 8), dtype=torch.bfloat16)
+    sin = torch.randn((1, 3, 8), dtype=torch.bfloat16)
+
+    output = a2_kernels._apply_rotary(hidden, cos, sin, interleaved=False)
+
+    assert output.dtype is torch.bfloat16
+    assert calls == [
+        (
+            torch.bfloat16,
+            torch.bfloat16,
+            torch.bfloat16,
+            "half",
+        )
+    ]
+
+
 def test_a2_rms_norm_uses_native_operator(monkeypatch):
     calls = []
 
