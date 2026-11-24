@@ -97,6 +97,11 @@ class OmniPlatform(Platform):
         return None
 
     @classmethod
+    def prepare_diffusion_forward_context(cls, model: nn.Module) -> None:
+        """Populate platform runtime state after entering a model forward context."""
+        return None
+
+    @classmethod
     def register_additional_diffusion_fused_moe_hooks(cls, moe_runner: Any) -> None:
         # One-shot lazy kernel initialisation on the first forward (no-op unless
         # the runner exposes an uninitialised quant_method). Mirrors the prior

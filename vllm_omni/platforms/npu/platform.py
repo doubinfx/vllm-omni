@@ -295,6 +295,39 @@ class NPUOmniPlatform(OmniPlatform, NPUPlatform):
         prepare_fused_moe_runtime()
 
     @classmethod
+    def prepare_diffusion_forward_context(cls, model: nn.Module) -> None:
+        from vllm.forward_context import get_forward_context
+        from vllm.config import get_current_vllm_config
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+        from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+
+        from vllm_omni.platforms.npu.layers.fused_moe import (
+            _select_moe_comm_method,
+        )
+
+        moe_config = next(
+            (
+                module.moe_config
+                for module in model.modules()
+                if getattr(module, "moe_config", None) is not None
+            ),
+            None,
+        )
+        if moe_config is None:
+            return
+        moe_comm_type = _select_moe_comm_method(vllm_config=get_current_vllm_config())
+        if moe_comm_type is None:
+            return
+        _EXTRA_CTX.moe_comm_type = moe_comm_type
+        _EXTRA_CTX.moe_comm_method = get_moe_comm_method(
+            moe_comm_type,
+            moe_config,
+        )
+        forward_context = get_forward_context()
+        forward_context.moe_comm_type = moe_comm_type
+        forward_context.moe_comm_method = _EXTRA_CTX.moe_comm_method
+
+    @classmethod
     def register_additional_diffusion_fused_moe_hooks(cls, moe_runner: Any) -> None:
         from vllm_omni.platforms.npu.layers.fused_moe import fused_moe_forward_context_pre_hook
 

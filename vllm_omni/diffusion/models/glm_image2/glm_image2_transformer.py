@@ -35,7 +35,7 @@ import torch
 import torch.nn.functional as F
 import vllm.forward_context as vllm_forward_context
 from torch import nn
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -54,6 +54,7 @@ from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.layers.fused_moe import FusedMoE
 from vllm_omni.diffusion.models.glm_image2.glm_image2_kernels import fused_rope_kv_supported, query_rope_, stage_kv
+from vllm_omni.platforms import current_omni_platform
 
 logger = init_logger(__name__)
 
@@ -935,10 +936,13 @@ class GlmImage2Transformer(nn.Module):
 
     @contextmanager
     def _vllm_forward_context(self):
-        if vllm_forward_context.is_forward_context_available():
-            yield
-            return
-        with vllm_forward_context.set_forward_context(None, self._vllm_config):
+        with current_omni_platform.set_forward_context(
+            None,
+            self._vllm_config,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            batch_descriptor=None,
+        ):
+            current_omni_platform.prepare_diffusion_forward_context(self)
             yield
 
     # --------------------------------------------------------------- forward

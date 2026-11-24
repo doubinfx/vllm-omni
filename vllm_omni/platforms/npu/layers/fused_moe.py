@@ -12,7 +12,7 @@ from vllm.distributed.parallel_state import (
     init_model_parallel_group as vllm_init_model_parallel_group,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
+from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 from vllm_omni.diffusion.distributed.parallel_state import (
@@ -114,7 +114,7 @@ def prepare_fused_moe_runtime() -> None:
     _ensure_forward_context_attr("num_tokens", int | None, None)
     _ensure_forward_context_attr("in_profile_run", bool, False)
     _ensure_forward_context_attr("moe_comm_type", MoECommType | None, moe_comm_type)
-    _ensure_forward_context_attr("moe_comm_method", Any, _MoECommMethods.get(moe_comm_type))
+    _ensure_forward_context_attr("moe_comm_method", Any, None)
     _ensure_forward_context_attr("flash_comm_v1_enabled", bool, False)
     _ensure_forward_context_attr("max_tokens_across_dp", int | None, None)
     _ensure_forward_context_attr("max_tokens_across_pcp", int | None, None)
@@ -178,4 +178,7 @@ def fused_moe_forward_context_pre_hook(
         _set_max_tokens(forward_context, hidden_states)
 
     forward_context.moe_comm_type = _select_moe_comm_method(vllm_config=omni_get_ctx().vllm_config)
-    forward_context.moe_comm_method = _MoECommMethods.get(forward_context.moe_comm_type)
+    forward_context.moe_comm_method = get_moe_comm_method(
+        forward_context.moe_comm_type,
+        getattr(module, "moe_config", None),
+    )

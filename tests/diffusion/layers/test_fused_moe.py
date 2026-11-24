@@ -213,3 +213,38 @@ class TestFusedMoEFactory:
             num_experts=4,
             num_redundant_experts=0,
         )
+
+
+class TestFusedMoEForwardContextHook:
+    def test_resolves_comm_method_with_layer_moe_config(self, mocker):
+        import vllm_omni.platforms.npu.layers.fused_moe as fused_moe
+
+        forward_context = SimpleNamespace(moe_comm_type=None, moe_comm_method=None)
+        module = SimpleNamespace(moe_config=object())
+        method = object()
+        mocker.patch.object(
+            fused_moe._vllm_fc,
+            "get_forward_context",
+            return_value=forward_context,
+        )
+        mocker.patch.object(
+            fused_moe,
+            "omni_get_ctx",
+            return_value=SimpleNamespace(vllm_config=object()),
+        )
+        mocker.patch.object(
+            fused_moe,
+            "_select_moe_comm_method",
+            return_value="allgather",
+        )
+        get_method = mocker.patch.object(
+            fused_moe,
+            "get_moe_comm_method",
+            return_value=method,
+        )
+
+        fused_moe.fused_moe_forward_context_pre_hook(module, (), {})
+
+        assert forward_context.moe_comm_type == "allgather"
+        assert forward_context.moe_comm_method is method
+        get_method.assert_called_once_with("allgather", module.moe_config)
