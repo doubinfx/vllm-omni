@@ -7,6 +7,7 @@ from __future__ import annotations
 from types import MethodType, ModuleType
 
 import torch
+import torch.nn.functional as F
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _A2_ROTARY_PATCHED = False
@@ -260,6 +261,25 @@ def _apply_exact_a2_rms_norm(
             module.weight,
             module.variance_epsilon,
         )[0]
+
+    if (
+        residual is not None
+        and hidden_states.shape[0] > 64
+        and hidden_states.device.type == "npu"
+        and hidden_states.dtype == torch.bfloat16
+        and module.weight.dtype == torch.bfloat16
+        and hidden_states.ndim == 2
+        and getattr(module, "variance_size_override", None) is None
+        and not torch.compiler.is_compiling()
+    ):
+        summed = hidden_states.float() + residual.float()
+        normalized = F.rms_norm(
+            summed,
+            (summed.shape[-1],),
+            eps=module.variance_epsilon,
+        )
+        output = normalized.to(torch.bfloat16) * module.weight
+        return output.to(torch.bfloat16), summed.to(torch.bfloat16)
 
     eligible = (
         HAS_TRITON

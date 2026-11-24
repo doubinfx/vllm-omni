@@ -128,11 +128,14 @@ def test_a2_dense_attention_uses_native_fusion(monkeypatch):
     ("hidden_size", "rows"),
     [
         (512, 1),
+        (512, 128),
         (512, 1024),
         (768, 1),
+        (768, 128),
         (768, 1024),
         (2048, 1),
         (2048, 64),
+        (2048, 128),
         (2048, 1024),
     ],
 )
