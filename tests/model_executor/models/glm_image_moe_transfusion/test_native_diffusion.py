@@ -323,6 +323,48 @@ def test_a2_moe_init_routing_uses_native_operator(monkeypatch):
     }
 
 
+def test_pack_a2_moe_weights_uses_nz_format(monkeypatch):
+    format_calls = []
+    config_values = []
+
+    class FakeConfig:
+        def __setattr__(self, name, value):
+            assert name == "allow_internal_format"
+            config_values.append(value)
+
+    def format_cast(tensor, _format):
+        format_calls.append(tensor.shape)
+        candidate = tensor.clone()
+        candidate._test_nz = True
+        return candidate
+
+    npu = SimpleNamespace(
+        _C=SimpleNamespace(
+            _npu_getOption=lambda _name: b"disable",
+        ),
+        npu_format_cast=format_cast,
+        get_npu_format=lambda tensor: 29
+        if getattr(tensor, "_test_nz", False)
+        else 2,
+    )
+    monkeypatch.setattr(a2_kernels, "_get_npu", lambda: npu)
+    monkeypatch.setattr(
+        a2_kernels.torch,
+        "npu",
+        SimpleNamespace(config=FakeConfig()),
+    )
+    experts = SimpleNamespace(
+        gate_up_proj=torch.nn.Parameter(torch.randn(2, 6, 4)),
+        down_proj=torch.nn.Parameter(torch.randn(2, 4, 3)),
+    )
+
+    packed = a2_kernels.pack_a2_moe_weights(SimpleNamespace(experts=experts))
+
+    assert packed == 2
+    assert format_calls == [torch.Size((2, 6, 4)), torch.Size((2, 4, 3))]
+    assert config_values == [True, False]
+
+
 def test_select_mrope_returns_single_request_tables():
     position_ids = torch.zeros((3, 7), dtype=torch.long)
     image_mask = torch.zeros((7,), dtype=torch.bool)

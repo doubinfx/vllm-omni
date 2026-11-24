@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 A2_FUSED_OPS_ENV = "GLM_IMAGE_MOE_A2_FUSED_OPS"
 A2_FA_VENDOR_ENV = "GLM_IMAGE_MOE_A2_FA_VENDOR"
+A2_NZ_FORMAT = 29
 A2_FA_VENDOR_FILES = (
     Path("op_api/lib/libcust_opapi.so"),
     Path("op_impl/ai_core/tbe/config/ascend910b/aic-ascend910b-ops-info.json"),
@@ -101,6 +102,46 @@ def use_a2_fused_moe() -> bool:
             "npu_swiglu",
         )
     )
+
+
+def pack_a2_moe_weights(mlp: nn.Module) -> int:
+    """Pack A2 grouped-GEMM expert weights into FRACTAL_NZ in place."""
+    experts = getattr(mlp, "experts", None)
+    if experts is None:
+        return 0
+
+    npu = _get_npu()
+    format_cast = getattr(npu, "npu_format_cast", None)
+    get_format = getattr(npu, "get_npu_format", None)
+    if format_cast is None or get_format is None:
+        return 0
+
+    previous = npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
+    was_enabled = previous == b"enable"
+    packed = 0
+    torch.npu.config.allow_internal_format = True
+    try:
+        for name in ("gate_up_proj", "down_proj"):
+            parameter = getattr(experts, name, None)
+            if parameter is None or get_format(parameter.data) == A2_NZ_FORMAT:
+                continue
+            try:
+                candidate = format_cast(parameter.data, A2_NZ_FORMAT)
+            except Exception as error:
+                logger.warning(
+                    "Unable to pack A2 MoE weight %s into NZ format: %s",
+                    name,
+                    error,
+                )
+                continue
+            if get_format(candidate) != A2_NZ_FORMAT:
+                logger.warning("Unable to pack A2 MoE weight %s into NZ format", name)
+                continue
+            parameter.data = candidate
+            packed += 1
+    finally:
+        torch.npu.config.allow_internal_format = was_enabled
+    return packed
 
 
 def use_a2_fused_rms_norm() -> bool:
@@ -314,6 +355,7 @@ __all__ = [
     "a2_moe_init_routing",
     "a2_moe_router_forward",
     "a2_rms_norm_forward",
+    "pack_a2_moe_weights",
     "prepare_a2_rotary_tables",
     "registered_a2_fa_vendor",
     "use_a2_fused_attention",

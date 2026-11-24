@@ -31,6 +31,7 @@ from vllm_omni.diffusion.models.glm_image_moe_transfusion.a2_kernels import (
     a2_attention_forward,
     a2_moe_forward,
     a2_rms_norm_forward,
+    pack_a2_moe_weights,
     prepare_a2_rotary_tables,
     use_a2_fused_attention,
     use_a2_fused_moe,
@@ -322,11 +323,13 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         )
 
     def _install_module_adapters(self) -> None:
+        packed_moe_weights = 0
         for layer in self.backbone.model.layers:
             if self.fused_attention:
                 self._wrap_attention(layer.self_attn)
             if self.fused_moe:
                 self._wrap_mlp(layer.mlp)
+                packed_moe_weights += pack_a2_moe_weights(layer.mlp)
             if self.fused_rms_norm:
                 for name in ("q_a_layernorm", "kv_a_layernorm"):
                     norm = getattr(layer.self_attn, name, None)
@@ -336,6 +339,8 @@ class NativeGlmImageMoeDiffusion(nn.Module):
                 self._wrap_rms_norm(layer.post_attention_layernorm)
         if self.fused_rms_norm:
             self._wrap_rms_norm(self.backbone.model.norm)
+        if packed_moe_weights:
+            logger.info("Packed %d A2 MoE weights into NZ format", packed_moe_weights)
 
     def _wrap_attention(self, attention: nn.Module) -> None:
         original_forward = attention.forward
