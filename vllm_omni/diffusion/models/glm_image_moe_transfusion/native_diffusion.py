@@ -30,8 +30,10 @@ from transformers import (
 from vllm_omni.diffusion.models.glm_image_moe_transfusion.a2_kernels import (
     a2_attention_forward,
     a2_moe_forward,
+    a2_rms_norm_forward,
     use_a2_fused_attention,
     use_a2_fused_moe,
+    use_a2_fused_rms_norm,
 )
 from vllm_omni.model_executor.models.glm_image_moe_transfusion.ascend_compat import (
     configure_a2_diffusion,
@@ -308,12 +310,14 @@ class NativeGlmImageMoeDiffusion(nn.Module):
         self.rope_layout = "qwen3"
         self.fused_attention = use_a2_fused_attention()
         self.fused_moe = use_a2_fused_moe()
-        if self.fused_attention or self.fused_moe:
+        self.fused_rms_norm = use_a2_fused_rms_norm()
+        if self.fused_attention or self.fused_moe or self.fused_rms_norm:
             self._install_module_adapters()
         logger.info(
-            "Native GLM-Image A2 kernels: attention=%s moe=%s",
+            "Native GLM-Image A2 kernels: attention=%s moe=%s rms_norm=%s",
             self.fused_attention,
             self.fused_moe,
+            self.fused_rms_norm,
         )
 
     def _install_module_adapters(self) -> None:
@@ -322,6 +326,15 @@ class NativeGlmImageMoeDiffusion(nn.Module):
                 self._wrap_attention(layer.self_attn)
             if self.fused_moe:
                 self._wrap_mlp(layer.mlp)
+            if self.fused_rms_norm:
+                for name in ("q_a_layernorm", "kv_a_layernorm"):
+                    norm = getattr(layer.self_attn, name, None)
+                    if norm is not None:
+                        self._wrap_rms_norm(norm)
+                self._wrap_rms_norm(layer.input_layernorm)
+                self._wrap_rms_norm(layer.post_attention_layernorm)
+        if self.fused_rms_norm:
+            self._wrap_rms_norm(self.backbone.model.norm)
 
     def _wrap_attention(self, attention: nn.Module) -> None:
         original_forward = attention.forward
@@ -361,6 +374,15 @@ class NativeGlmImageMoeDiffusion(nn.Module):
             return original_forward(hidden_states)
 
         mlp.forward = MethodType(mlp_forward, mlp)
+
+    def _wrap_rms_norm(self, norm: nn.Module) -> None:
+        original_forward = norm.forward
+
+        @wraps(original_forward)
+        def rms_norm_forward(module: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+            return a2_rms_norm_forward(module, hidden_states)
+
+        norm.forward = MethodType(rms_norm_forward, norm)
 
     def _load_extra_weights(self) -> None:
         index = json.loads((self.checkpoint / "model.safetensors.index.json").read_text())

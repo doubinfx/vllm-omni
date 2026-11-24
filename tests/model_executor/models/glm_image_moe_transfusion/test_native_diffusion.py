@@ -170,6 +170,30 @@ def test_a2_rotary_splits_unsupported_batch_input(monkeypatch):
     assert all(shape[0] == 1 for shape, _, _, _ in calls)
 
 
+def test_a2_rms_norm_uses_native_operator(monkeypatch):
+    calls = []
+
+    def rms_norm(hidden, weight, *, epsilon):
+        calls.append((hidden, weight, epsilon))
+        return hidden, torch.empty(0)
+
+    monkeypatch.setattr(
+        a2_kernels,
+        "_get_npu",
+        lambda: SimpleNamespace(npu_rms_norm=rms_norm),
+    )
+    norm = SimpleNamespace(
+        weight=torch.ones(8),
+        variance_epsilon=1e-5,
+    )
+    hidden = torch.randn((2, 3, 8))
+
+    output = a2_kernels.a2_rms_norm_forward(norm, hidden)
+
+    assert output is hidden
+    assert calls == [(hidden, norm.weight, 1e-5)]
+
+
 def test_select_mrope_returns_single_request_tables():
     position_ids = torch.zeros((3, 7), dtype=torch.long)
     image_mask = torch.zeros((7,), dtype=torch.bool)
@@ -227,6 +251,7 @@ def test_module_adapters_are_scoped_to_enabled_kernels():
     model = object.__new__(native_diffusion.NativeGlmImageMoeDiffusion)
     model.fused_attention = True
     model.fused_moe = False
+    model.fused_rms_norm = False
     attention = torch.nn.Linear(4, 4)
     mlp = torch.nn.Linear(4, 4)
     layer = SimpleNamespace(self_attn=attention, mlp=mlp)
@@ -245,6 +270,7 @@ def test_module_adapters_leave_both_paths_untouched_when_disabled():
     model = object.__new__(native_diffusion.NativeGlmImageMoeDiffusion)
     model.fused_attention = False
     model.fused_moe = False
+    model.fused_rms_norm = False
     attention = torch.nn.Linear(4, 4)
     mlp = torch.nn.Linear(4, 4)
     layer = SimpleNamespace(self_attn=attention, mlp=mlp)

@@ -102,6 +102,21 @@ def use_a2_fused_moe() -> bool:
     )
 
 
+def use_a2_fused_rms_norm() -> bool:
+    if not _env_enabled(A2_FUSED_OPS_ENV) or not is_ascend_a2():
+        return False
+    return hasattr(_get_npu(), "npu_rms_norm")
+
+
+def a2_rms_norm_forward(norm: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Use the A2 fused RMSNorm for Transformers' FP32 reference module."""
+    return _get_npu().npu_rms_norm(
+        hidden_states,
+        norm.weight,
+        epsilon=float(norm.variance_epsilon),
+    )[0]
+
+
 def _apply_rotary(
     hidden_states: torch.Tensor,
     cos: torch.Tensor,
@@ -234,7 +249,9 @@ __all__ = [
     "A2_FA_VENDOR_ENV",
     "a2_attention_forward",
     "a2_moe_forward",
+    "a2_rms_norm_forward",
     "registered_a2_fa_vendor",
     "use_a2_fused_attention",
     "use_a2_fused_moe",
+    "use_a2_fused_rms_norm",
 ]
